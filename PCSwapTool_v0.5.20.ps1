@@ -922,8 +922,8 @@ function Register-UserResumeTaskEx {
     try {
         $taskName = 'PCSwap-Resume-User'
         # Base args always include -ResumeUser
-        $args = "-NoProfile -ExecutionPolicy Bypass -File `\"$ScriptPath\"` -ResumeUser"
-        if ($ManifestPath) { $args += " -Manifest `\"$ManifestPath\"`" }
+        $args = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -ResumeUser"
+        if ($ManifestPath) { $args += " -Manifest `"$ManifestPath`"" }
         $action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $args
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $UserName
         $principal = New-ScheduledTaskPrincipal -UserId $UserName -RunLevel Limited -LogonType Interactive

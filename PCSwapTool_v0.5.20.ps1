@@ -187,6 +187,18 @@ $script:ToolRoot = try {
 } catch {
     (Get-Location).Path
 }
+
+$script:DependencyCacheRoot = try {
+    Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath 'PCSwapTool'
+} catch {
+    Join-Path -Path $env:TEMP -ChildPath 'PCSwapTool'
+}
+$script:ResourceDownloadBaseUrl = if ([string]::IsNullOrWhiteSpace($env:PCSwapToolResourceBaseUrl)) {
+    'https://raw.githubusercontent.com/soballin93/PCMigrationTool/main/'
+} else {
+    $env:PCSwapToolResourceBaseUrl
+}
+
 $script:SqliteAssemblyLoaded   = $false
 $script:BouncyCastleLoaded     = $false
 
@@ -669,6 +681,46 @@ function Get-UserInfoPack {
 
 # -------------- Chrome Password Export (automated) --------------
 
+function Invoke-DownloadToolResource {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$FileName)
+
+    if ([string]::IsNullOrWhiteSpace($FileName)) { return $null }
+
+    $baseUrl = $script:ResourceDownloadBaseUrl
+    if ([string]::IsNullOrWhiteSpace($baseUrl)) { return $null }
+
+    $cacheRoot = $script:DependencyCacheRoot
+    if ([string]::IsNullOrWhiteSpace($cacheRoot)) { return $null }
+
+    try {
+        if (-not (Test-Path $cacheRoot)) {
+            New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
+        }
+    } catch {
+        Write-Log -Message ("Failed to prepare dependency cache at {0}: {1}" -f $cacheRoot, $_) -Level 'WARN'
+        return $null
+    }
+
+    $normalizedBase = if ($baseUrl.Trim().EndsWith('/')) { $baseUrl.Trim() } else { $baseUrl.Trim() + '/' }
+    $uri = $normalizedBase + $FileName
+    $targetPath = Join-Path -Path $cacheRoot -ChildPath $FileName
+
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+    } catch {}
+
+    try {
+        Invoke-WebRequest -Uri $uri -OutFile $targetPath -UseBasicParsing -ErrorAction Stop | Out-Null
+        Write-Log -Message "Downloaded $FileName from $uri to $targetPath"
+        return $targetPath
+    } catch {
+        Write-Log -Message ("Failed to download {0} from {1}: {2}" -f $FileName, $uri, $_) -Level 'WARN'
+        return $null
+    }
+}
+
+
 function Get-ToolResourcePath {
     [CmdletBinding()]
     param([Parameter(Mandatory=$true)][string]$FileName)
@@ -681,6 +733,10 @@ function Get-ToolResourcePath {
     if ($currentPath) {
         $candidates += (Join-Path $currentPath $FileName)
     }
+    if ($script:DependencyCacheRoot) {
+        $candidates += (Join-Path -Path $script:DependencyCacheRoot -ChildPath $FileName)
+    }
+
 
     foreach ($candidate in $candidates | Select-Object -Unique) {
         try {
@@ -689,6 +745,16 @@ function Get-ToolResourcePath {
             }
         } catch {}
     }
+
+    $downloadedPath = Invoke-DownloadToolResource -FileName $FileName
+    if ($downloadedPath -and (Test-Path $downloadedPath)) {
+        try {
+            return (Resolve-Path -Path $downloadedPath -ErrorAction Stop).Path
+        } catch {
+            return $downloadedPath
+        }
+    }
+
 
     return $null
 }

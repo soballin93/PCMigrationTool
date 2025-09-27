@@ -2,7 +2,7 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.31 (2025-10-02)
+    Version: 0.5.32 (2025-10-03)
 
 
 
@@ -13,6 +13,10 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.32
+      - Fix: Run restore resume scheduled tasks with the highest privileges so
+        Robocopy can write to C:\Users during user logon restores.
+      - Date: 2025-10-03
     0.5.31
       - Fix: Initialize resume flows with the manifest override before attempting to read
         state.json so SwapInfoRoot is populated for scheduled resume tasks.
@@ -220,7 +224,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.31'
+$ProgramVersion = '0.5.32'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -1353,7 +1357,7 @@ function Register-UserResumeTask { param([string]$UserName,[string]$ScriptPath)
         $taskName="PCSwap-Resume-User"
         $action=New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -ResumeUser")
         $trigger=New-ScheduledTaskTrigger -AtLogOn -User $UserName
-        $principal=New-ScheduledTaskPrincipal -UserId $UserName -RunLevel Limited -LogonType Interactive
+        $principal=New-ScheduledTaskPrincipal -UserId $UserName -RunLevel Highest -LogonType Interactive
         Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
         Write-Log -Message "Registered user-context resume task for $UserName."
         $true
@@ -1384,7 +1388,7 @@ function Register-UserResumeTaskEx {
 
         $action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $args
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $UserName
-        $principal = New-ScheduledTaskPrincipal -UserId $UserName -RunLevel Limited -LogonType Interactive
+        $principal = New-ScheduledTaskPrincipal -UserId $UserName -RunLevel Highest -LogonType Interactive
         Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
         Write-Log -Message "Registered user-context resume task for $UserName via Register-UserResumeTaskEx."
         return $true

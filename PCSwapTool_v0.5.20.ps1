@@ -4,6 +4,7 @@
     PC Swap Tool (GUI) - Gather & Restore
     Version: 0.5.22 (2025-09-27)
 
+
 .DESCRIPTION
     A WinForms GUI PowerShell tool to gather migration data from a Windows 10/11 machine,
     produce a technician report and a machine-readable manifest, and restore/apply that data

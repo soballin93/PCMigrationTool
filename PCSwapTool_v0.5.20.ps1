@@ -152,7 +152,11 @@ param(
     [switch]$Resume,
     [switch]$ResumeUser,
     [string]$LogoPath,
-    [string]$Manifest
+    [string]$Manifest,
+    [string]$DestinationPath,
+    [switch]$IncludeOneDrive,
+    [switch]$SkipProfileCopy,
+    [switch]$CaptureOutlookCredentials
 )
 
 Set-StrictMode -Version Latest
@@ -170,6 +174,41 @@ $StatePath      = $null
 $DeregListPath = $null
 $ChromeCsvName  = 'Chrome Passwords.csv'
 $WallpaperName  = 'TranscodedWallpaper'
+
+$script:ToolRoot = try {
+    $cmdPath = $MyInvocation.MyCommand.Path
+    if (-not [string]::IsNullOrEmpty($cmdPath)) {
+        Split-Path -Parent $cmdPath
+    } elseif ($PSCommandPath) {
+        Split-Path -Parent $PSCommandPath
+    } else {
+        (Get-Location).Path
+    }
+} catch {
+    (Get-Location).Path
+}
+
+$script:DependencyCacheRoot = try {
+    Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath 'PCSwapTool'
+} catch {
+    Join-Path -Path $env:TEMP -ChildPath 'PCSwapTool'
+}
+$script:ResourceDownloadBaseUrl = if ([string]::IsNullOrWhiteSpace($env:PCSwapToolResourceBaseUrl)) {
+    'https://raw.githubusercontent.com/soballin93/PCMigrationTool/main/'
+} else {
+    $env:PCSwapToolResourceBaseUrl
+}
+
+$script:SqliteAssemblyLoaded   = $false
+$script:BouncyCastleLoaded     = $false
+
+# Ensure the repository-scoped globals are also available in the global scope so
+# that event handlers executed outside the original script scope can see them
+# when the script is invoked from an in-memory script block (e.g. irm | iex).
+$global:SwapInfoRoot = $SwapInfoRoot
+$global:StatePath = $StatePath
+$global:DeregListPath = $DeregListPath
+$global:LogPath = $LogPath
 
 # If a manifest path is supplied on the command line, it will be captured here and used
 # during resume phases instead of reading state.json.  This allows the restore flow
@@ -201,6 +240,15 @@ function Ensure-Repository {
     $dateStr = Get-Date -Format 'dd-MM-yyyy'
     $repo    = Join-Path $BasePath ("{0}_{1}" -f $env:COMPUTERNAME,$dateStr)
     $root    = Join-Path $repo 'PC_SWAP_INFO'
+    try {
+        if (-not (Test-Path $repo)) {
+            New-Item -ItemType Directory -Path $repo -Force | Out-Null
+            Write-Log -Message "Created repository host folder: $repo"
+        }
+    } catch {
+        Write-Log -Message "Failed to prepare repository host folder $repo : $($_)" -Level 'ERROR'
+        return $null
+    }
     Set-SwapInfoRoot -RepoRoot $root
     if ($OpenFolder) { Start-Process explorer.exe $root | Out-Null }
     return $root
@@ -217,7 +265,59 @@ function Set-SwapInfoRoot {
     $script:StatePath     = Join-Path $script:SwapInfoRoot 'state.json'
     $script:DeregListPath = Join-Path $script:SwapInfoRoot 'deregistration-checklist.json'
     $script:LogPath       = Join-Path $script:SwapInfoRoot ("pcswap_{0}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+
+    # Mirror repository paths into the global scope so that event handlers raised
+    # after the initial script invocation (for example when the script is invoked
+    # from an in-memory script block) continue to resolve these variables.
+    $global:SwapInfoRoot  = $script:SwapInfoRoot
+    $global:StatePath     = $script:StatePath
+    $global:DeregListPath = $script:DeregListPath
+    $global:LogPath       = $script:LogPath
     try { Write-Log -Message "SwapInfoRoot set: $script:SwapInfoRoot" } catch {}
+}
+
+function Get-SwapInfoRoot {
+    if ($script:SwapInfoRoot -and -not [string]::IsNullOrWhiteSpace($script:SwapInfoRoot)) {
+        return $script:SwapInfoRoot
+    }
+    if ($global:SwapInfoRoot -and -not [string]::IsNullOrWhiteSpace($global:SwapInfoRoot)) {
+        return $global:SwapInfoRoot
+    }
+    return $null
+}
+
+function Get-StatePath {
+    if ($script:StatePath -and -not [string]::IsNullOrWhiteSpace($script:StatePath)) {
+        return $script:StatePath
+    }
+    if ($global:StatePath -and -not [string]::IsNullOrWhiteSpace($global:StatePath)) {
+        return $global:StatePath
+    }
+    $root = Get-SwapInfoRoot
+    if ($root) { return Join-Path $root 'state.json' }
+    return $null
+}
+
+function Get-DeregListPath {
+    if ($script:DeregListPath -and -not [string]::IsNullOrWhiteSpace($script:DeregListPath)) {
+        return $script:DeregListPath
+    }
+    if ($global:DeregListPath -and -not [string]::IsNullOrWhiteSpace($global:DeregListPath)) {
+        return $global:DeregListPath
+    }
+    $root = Get-SwapInfoRoot
+    if ($root) { return Join-Path $root 'deregistration-checklist.json' }
+    return $null
+}
+
+function Get-LogPath {
+    if ($script:LogPath -and -not [string]::IsNullOrWhiteSpace($script:LogPath)) {
+        return $script:LogPath
+    }
+    if ($global:LogPath -and -not [string]::IsNullOrWhiteSpace($global:LogPath)) {
+        return $global:LogPath
+    }
+    return $null
 }
 
 
@@ -290,14 +390,18 @@ function Get-MappedDrives {
     try {
         $ws = New-Object -ComObject WScript.Network
         $col = $ws.EnumNetworkDrives()
-        for ($i = 0; $i -lt $col.Count; $i += 2) {
-            $drv  = $col.Item($i)
-            $path = $col.Item($i + 1)
-            if (-not [string]::IsNullOrWhiteSpace($drv)) {
-                $drives += [PSCustomObject]@{
-                    DeviceID     = $drv
-                    ProviderName = $path
-                    VolumeName   = $null
+        if ($null -ne $col) {
+            $countMethod = $col.PSObject.Methods['Count']
+            $count = if ($countMethod) { [int]$col.Count() } else { 0 }
+            for ($i = 0; $i -lt $count; $i += 2) {
+                $drv  = $col.Item($i)
+                $path = $col.Item($i + 1)
+                if (-not [string]::IsNullOrWhiteSpace($drv)) {
+                    $drives += [PSCustomObject]@{
+                        DeviceID     = $drv
+                        ProviderName = $path
+                        VolumeName   = $null
+                    }
                 }
             }
         }
@@ -341,8 +445,12 @@ function Get-MappedDrives {
 # can be restored later.  Existing XML files are removed first.
 function Export-WlanProfiles {
     try {
-        if (-not $SwapInfoRoot) { Write-Log -Message "SwapInfoRoot not set; cannot export WLAN profiles." -Level 'WARN'; return $false }
-        $dest = Join-Path $SwapInfoRoot 'WirelessProfiles'
+        $repoRoot = Get-SwapInfoRoot
+        if (-not $repoRoot) {
+            Write-Log -Message "SwapInfoRoot not set; cannot export WLAN profiles." -Level 'WARN'
+            return $false
+        }
+        $dest = Join-Path $repoRoot 'WirelessProfiles'
         if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
         # Remove any previous exported profiles to avoid duplicates
         Get-ChildItem -Path $dest -Filter '*.xml' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
@@ -409,7 +517,7 @@ function Write-Log {
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $line = "[{0}][{1}] {2}" -f $ts,$Level,$Message
     try {
-        $target = $script:LogPath
+        $target = Get-LogPath
         if ([string]::IsNullOrWhiteSpace($target)) {
             $target = Join-Path $env:TEMP ("pcswap_{0}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
         }
@@ -571,94 +679,563 @@ function Get-UserInfoPack {
     }
 }
 
-# -------------- Chrome Password Export (guided) --------------
+# -------------- Chrome Password Export (automated) --------------
+
+function Invoke-DownloadToolResource {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$FileName)
+
+    if ([string]::IsNullOrWhiteSpace($FileName)) { return $null }
+
+    $baseUrl = $script:ResourceDownloadBaseUrl
+    if ([string]::IsNullOrWhiteSpace($baseUrl)) { return $null }
+
+    $cacheRoot = $script:DependencyCacheRoot
+    if ([string]::IsNullOrWhiteSpace($cacheRoot)) { return $null }
+
+    try {
+        if (-not (Test-Path $cacheRoot)) {
+            New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
+        }
+    } catch {
+        Write-Log -Message ("Failed to prepare dependency cache at {0}: {1}" -f $cacheRoot, $_) -Level 'WARN'
+        return $null
+    }
+
+    $normalizedBase = if ($baseUrl.Trim().EndsWith('/')) { $baseUrl.Trim() } else { $baseUrl.Trim() + '/' }
+    $uri = $normalizedBase + $FileName
+    $targetPath = Join-Path -Path $cacheRoot -ChildPath $FileName
+
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+    } catch {}
+
+    try {
+        Invoke-WebRequest -Uri $uri -OutFile $targetPath -UseBasicParsing -ErrorAction Stop | Out-Null
+        Write-Log -Message "Downloaded $FileName from $uri to $targetPath"
+        return $targetPath
+    } catch {
+        Write-Log -Message ("Failed to download {0} from {1}: {2}" -f $FileName, $uri, $_) -Level 'WARN'
+        return $null
+    }
+}
 
 
-function Guide-ChromePasswordExport {
-    if (-not $SwapInfoRoot) {
-        # Try using current UI dest box if available
+function Get-ToolResourcePath {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$FileName)
+
+    $candidates = @()
+    if ($script:ToolRoot -and (Test-Path $script:ToolRoot)) {
+        $candidates += (Join-Path $script:ToolRoot $FileName)
+    }
+    $currentPath = (Get-Location).Path
+    if ($currentPath) {
+        $candidates += (Join-Path $currentPath $FileName)
+    }
+    if ($script:DependencyCacheRoot) {
+        $candidates += (Join-Path -Path $script:DependencyCacheRoot -ChildPath $FileName)
+    }
+
+
+    foreach ($candidate in $candidates | Select-Object -Unique) {
         try {
-            if ($tbDest -and $tbDest.Text) {
-                $null = Ensure-Repository -BasePath $tbDest.Text -OpenFolder:$false
+            if (Test-Path $candidate) {
+                return (Resolve-Path -Path $candidate -ErrorAction Stop).Path
             }
         } catch {}
-        if (-not $SwapInfoRoot) {
-            Write-Log -Message "SwapInfoRoot not set before Chrome export; aborting" -Level 'ERROR'
+    }
+
+    $downloadedPath = Invoke-DownloadToolResource -FileName $FileName
+    if ($downloadedPath -and (Test-Path $downloadedPath)) {
+        try {
+            return (Resolve-Path -Path $downloadedPath -ErrorAction Stop).Path
+        } catch {
+            return $downloadedPath
+        }
+    }
+
+
+    return $null
+}
+
+function Ensure-SqliteAssembly {
+    if ($script:SqliteAssemblyLoaded) { return $true }
+
+    $dllPath = Get-ToolResourcePath -FileName 'System.Data.SQLite.dll'
+    if (-not $dllPath) {
+        Write-Log -Message 'System.Data.SQLite.dll not found; Chrome password export is unavailable.' -Level 'ERROR'
+        return $false
+    }
+
+    try {
+        [void][System.Reflection.Assembly]::LoadFrom($dllPath)
+        $script:SqliteAssemblyLoaded = $true
+        Write-Log -Message "Loaded System.Data.SQLite from $dllPath"
+        return $true
+    } catch {
+        Write-Log -Message ("Failed to load System.Data.SQLite.dll: {0}" -f $_) -Level 'ERROR'
+        return $false
+    }
+}
+
+function Ensure-BouncyCastleAssembly {
+    if ($script:BouncyCastleLoaded) { return $true }
+
+    $dllPath = Get-ToolResourcePath -FileName 'BouncyCastle.Crypto.dll'
+    if (-not $dllPath) {
+        Write-Log -Message 'BouncyCastle.Crypto.dll not found; Chrome password decryption is unavailable.' -Level 'ERROR'
+        return $false
+    }
+
+    try {
+        [void][System.Reflection.Assembly]::LoadFrom($dllPath)
+        $script:BouncyCastleLoaded = $true
+        Write-Log -Message "Loaded BouncyCastle.Crypto from $dllPath"
+        return $true
+    } catch {
+        Write-Log -Message ("Failed to load BouncyCastle.Crypto.dll: {0}" -f $_) -Level 'ERROR'
+        return $false
+    }
+}
+
+function Get-ProtectedDataType {
+    foreach ($asm in [AppDomain]::CurrentDomain.GetAssemblies()) {
+        $type = $asm.GetType('System.Security.Cryptography.ProtectedData', $false)
+        if ($type) { return $type }
+    }
+    return $null
+}
+
+function Ensure-ProtectedDataSupport {
+    if ($script:ProtectedDataReady) { return $true }
+
+    if (Get-ProtectedDataType) {
+        $script:ProtectedDataReady = $true
+        return $true
+    }
+
+    $assemblyNames = @(
+        'System.Security.Cryptography.ProtectedData',
+        'System.Security',
+        'System.Security.Cryptography'
+    )
+
+    foreach ($assemblyName in $assemblyNames) {
+        try {
+            Add-Type -AssemblyName $assemblyName -ErrorAction Stop | Out-Null
+        } catch {
+            continue
+        }
+
+        if (Get-ProtectedDataType) {
+            $script:ProtectedDataReady = $true
+            return $true
+        }
+    }
+
+    Write-Log -Message 'System.Security.Cryptography.ProtectedData type is unavailable; DPAPI decryption will be skipped.' -Level 'ERROR'
+    return $false
+}
+
+function Get-ChromeEncryptionKey {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$UserDataPath)
+
+    $localStatePath = Join-Path $UserDataPath 'Local State'
+    if (-not (Test-Path $localStatePath)) {
+        Write-Log -Message "Chrome Local State not found at $localStatePath" -Level 'WARN'
+        return $null
+    }
+
+    try {
+        $json = Get-Content -Path $localStatePath -Raw -ErrorAction Stop
+        $state = $json | ConvertFrom-Json
+        $encryptedKey = $state.os_crypt.encrypted_key
+        if (-not $encryptedKey) {
+            Write-Log -Message 'Chrome Local State does not contain an encrypted_key entry.' -Level 'WARN'
+            return $null
+        }
+
+        $keyBytes = [System.Convert]::FromBase64String($encryptedKey)
+        $prefix = [System.Text.Encoding]::ASCII.GetBytes('DPAPI')
+        if ($keyBytes.Length -le $prefix.Length) {
+            Write-Log -Message 'Chrome encrypted_key value is shorter than expected.' -Level 'WARN'
+            return $null
+        }
+
+        $payload = New-Object byte[] ($keyBytes.Length - $prefix.Length)
+        [Array]::Copy($keyBytes, $prefix.Length, $payload, 0, $payload.Length)
+        if (-not (Ensure-ProtectedDataSupport)) {
+            return $null
+        }
+        return [System.Security.Cryptography.ProtectedData]::Unprotect(
+            $payload,
+            $null,
+            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+    } catch {
+        Write-Log -Message ("Failed to obtain Chrome encryption key: {0}" -f $_) -Level 'ERROR'
+        return $null
+    }
+}
+
+function ConvertFrom-ChromeSecret {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][byte[]]$Data,
+        [byte[]]$Key
+    )
+
+    if (-not $Data -or $Data.Length -eq 0) { return '' }
+
+    $prefix = if ($Data.Length -ge 3) { [System.Text.Encoding]::ASCII.GetString($Data, 0, 3) } else { '' }
+
+    try {
+        if ($prefix -in @('v10','v11','v12')) {
+            if (-not $Key -or $Key.Length -eq 0) {
+                return ''
+            }
+            if (-not (Ensure-BouncyCastleAssembly)) {
+                return ''
+            }
+
+            $nonceLength = 12
+            if ($Data.Length -lt (3 + $nonceLength + 16)) {
+                return ''
+            }
+
+            $nonce = New-Object byte[] $nonceLength
+            [Array]::Copy($Data, 3, $nonce, 0, $nonceLength)
+
+            $cipherTextLength = $Data.Length - 3 - $nonceLength
+            $cipherTextAndTag = New-Object byte[] $cipherTextLength
+            [Array]::Copy($Data, 3 + $nonceLength, $cipherTextAndTag, 0, $cipherTextLength)
+
+            $engine = New-Object Org.BouncyCastle.Crypto.Engines.AesEngine
+            $cipher = New-Object Org.BouncyCastle.Crypto.Modes.GcmBlockCipher ($engine)
+            $keyParam = New-Object Org.BouncyCastle.Crypto.Parameters.KeyParameter ($Key)
+            $parameters = New-Object Org.BouncyCastle.Crypto.Parameters.AeadParameters ($keyParam, 128, $nonce, $null)
+            $cipher.Init($false, $parameters)
+
+            $output = New-Object byte[] ($cipher.GetOutputSize($cipherTextAndTag.Length))
+            $bytesProcessed = $cipher.ProcessBytes($cipherTextAndTag, 0, $cipherTextAndTag.Length, $output, 0)
+            $bytesProcessed += $cipher.DoFinal($output, $bytesProcessed)
+
+            return ([System.Text.Encoding]::UTF8.GetString($output, 0, $bytesProcessed)).TrimEnd([char]0)
+        }
+
+        if (-not (Ensure-ProtectedDataSupport)) {
+            return ''
+        }
+        $dpapiBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+            $Data,
+            $null,
+            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        return ([System.Text.Encoding]::UTF8.GetString($dpapiBytes)).TrimEnd([char]0)
+    } catch {
+        Write-Log -Message ("Failed to decrypt Chrome secret: {0}" -f $_) -Level 'WARN'
+        return ''
+    }
+}
+
+function Export-ChromePasswords {
+    [CmdletBinding()]
+    param([switch]$ShowSummary)
+
+    $repoRoot = Get-SwapInfoRoot
+    if (-not $repoRoot) {
+        if ($tbDest -and $tbDest.Text) {
+            try {
+                $null = Ensure-Repository -BasePath $tbDest.Text -OpenFolder:$false
+                $repoRoot = Get-SwapInfoRoot
+            } catch {}
+        }
+
+        if (-not $repoRoot) {
+            Write-Log -Message 'SwapInfoRoot not set before Chrome export; aborting' -Level 'ERROR'
+            if ($ShowSummary) {
+                [System.Windows.Forms.MessageBox]::Show('Unable to determine repository path for Chrome export.', 'Chrome Password Export', 'OK', 'Error') | Out-Null
+            }
             return $false
         }
     }
 
-    try{
-        $paths = @()
-        if ($env:ProgramFiles)        { $paths += (Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe') }
-        if (${env:ProgramFiles(x86)}) { $paths += (Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe') }
-        if ($env:LOCALAPPDATA)        { $paths += (Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe') }
+    if (-not (Ensure-SqliteAssembly)) {
+        if ($ShowSummary) {
+            [System.Windows.Forms.MessageBox]::Show('SQLite dependency missing. See log for details.', 'Chrome Password Export', 'OK', 'Error') | Out-Null
+        }
+        return $false
+    }
+
+    $chromeRoot = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data' } else { $null }
+    if (-not $chromeRoot -or -not (Test-Path $chromeRoot)) {
+        Write-Log -Message 'Chrome user data folder not found; skipping password export.' -Level 'WARN'
+        if ($ShowSummary) {
+            [System.Windows.Forms.MessageBox]::Show('Google Chrome user data was not found for the current user.', 'Chrome Password Export', 'OK', 'Warning') | Out-Null
+        }
+        return $false
+    }
+
+    $encryptionKey = Get-ChromeEncryptionKey -UserDataPath $chromeRoot
+    if (-not $encryptionKey) {
+        Write-Log -Message 'Chrome AES encryption key unavailable; will attempt DPAPI fallback for each credential.' -Level 'WARN'
+    }
+
+    $profiles = @(Get-ChildItem -Path $chromeRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
+        Test-Path (Join-Path $_.FullName 'Login Data')
+    })
+
+    if ($profiles.Count -eq 0) {
+        Write-Log -Message 'No Chrome profiles with saved passwords were found.' -Level 'WARN'
+        if ($ShowSummary) {
+            [System.Windows.Forms.MessageBox]::Show('No Chrome profiles containing saved passwords were found.', 'Chrome Password Export', 'OK', 'Information') | Out-Null
+        }
+        return $false
+    }
+
+    $entries = New-Object System.Collections.Generic.List[object]
+    $processedProfiles = @()
+
+    foreach ($profile in $profiles) {
+        $dbPath = Join-Path $profile.FullName 'Login Data'
+        $tempPath = Join-Path ([System.IO.Path]::GetTempPath()) ("chrome_login_{0}_{1}.db" -f ($profile.Name -replace '[^a-zA-Z0-9_-]', '_'), [System.Guid]::NewGuid().ToString('N'))
+
         try {
-            $appPath = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe' -ErrorAction SilentlyContinue).'(default)'
-            if ($appPath) { $paths = ,$appPath + $paths }
-        } catch {}
-        $found = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
-        if(-not $found){ Write-Log -Message ("Chrome not found. Searched: {0}" -f ($paths -join '; ')) -Level 'WARN'; return $false }
-        $target='chrome://settings/passwords'
-        Start-Process -FilePath $found -ArgumentList $target
-        Write-Log -Message "Opened Chrome password manager via: $found"
-        [System.Windows.Forms.MessageBox]::Show(
-"Chrome export steps:
+            [System.IO.File]::Copy($dbPath, $tempPath, $true)
+        } catch {
+            Write-Log -Message ("Failed to copy Chrome Login Data from profile {0}: {1}" -f $profile.FullName, $_) -Level 'WARN'
+            continue
+        }
 
-1) In Chrome, Select 3 dots in top right > Passwords and Autofill >  Google Password Manager
-2) Settings on the Left.
-3) Select Download File next to Export Passwords.
-4) Authenticate with Windows.
-5) Save as: $SwapInfoRoot\$ChromeCsvName
+        $connection = $null
+        $command = $null
+        $reader = $null
 
-Click OK here after saving.", "Chrome Export", 'OK','Information') | Out-Null
-        $dest=Join-Path $SwapInfoRoot $ChromeCsvName
-        if(Test-Path $dest){ Write-Log -Message "Chrome CSV present: $dest"; return $true } else { Write-Log -Message "Chrome CSV not found at $dest" -Level 'WARN'; return $false }
-    }catch{ Write-Log -Message ("Chrome export guidance error: {0}" -f $_) -Level 'ERROR'; return $false }
+        try {
+            $connection = New-Object System.Data.SQLite.SQLiteConnection ("Data Source=$tempPath;Version=3;Read Only=True;")
+            $connection.Open()
+
+            $command = $connection.CreateCommand()
+            $command.CommandText = 'SELECT origin_url, action_url, username_value, password_value FROM logins WHERE length(password_value) > 0'
+            $reader = $command.ExecuteReader()
+
+            $profileHadEntries = $false
+            while ($reader.Read()) {
+                $origin = if (-not $reader.IsDBNull(0)) { $reader.GetString(0) } else { '' }
+                $action = if (-not $reader.IsDBNull(1)) { $reader.GetString(1) } else { '' }
+                $username = if (-not $reader.IsDBNull(2)) { $reader.GetString(2) } else { '' }
+                $secret = if (-not $reader.IsDBNull(3)) { [byte[]]$reader.GetValue(3) } else { $null }
+
+                if (-not $secret -or $secret.Length -eq 0) { continue }
+
+                $password = ConvertFrom-ChromeSecret -Data $secret -Key $encryptionKey
+                if ([string]::IsNullOrEmpty($password)) { continue }
+
+                $entries.Add([PSCustomObject]@{
+                        Profile   = $profile.Name
+                        OriginUrl = $origin
+                        ActionUrl = $action
+                        Username  = $username
+                        Password  = $password
+                    }) | Out-Null
+                $profileHadEntries = $true
+            }
+
+            if ($profileHadEntries) {
+                $processedProfiles += $profile.Name
+            }
+        } catch {
+            Write-Log -Message ("Failed to read Chrome passwords for profile {0}: {1}" -f $profile.FullName, $_) -Level 'WARN'
+        } finally {
+            if ($reader) { $reader.Close(); $reader.Dispose() }
+            if ($command) { $command.Dispose() }
+            if ($connection) { $connection.Close(); $connection.Dispose() }
+            if (Test-Path $tempPath) {
+                Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    $destPath = Join-Path $repoRoot $ChromeCsvName
+
+    if ($entries.Count -eq 0) {
+        try {
+            '"Profile","OriginUrl","ActionUrl","Username","Password"' | Set-Content -Path $destPath -Encoding UTF8
+            Write-Log -Message ("Chrome password export completed; no decryptable credentials were found. Created empty CSV at {0}" -f $destPath)
+            if ($ShowSummary) {
+                [System.Windows.Forms.MessageBox]::Show('No Chrome passwords were found. An empty export file was created.', 'Chrome Password Export', 'OK', 'Information') | Out-Null
+            }
+            return $true
+        } catch {
+            Write-Log -Message ("Failed to create empty Chrome password CSV: {0}" -f $_) -Level 'ERROR'
+            if ($ShowSummary) {
+                [System.Windows.Forms.MessageBox]::Show('Chrome password export failed while creating an empty CSV. See log for details.', 'Chrome Password Export', 'OK', 'Error') | Out-Null
+            }
+            return $false
+        }
+    }
+
+    $success = $false
+
+    try {
+        $entries | Select-Object Profile, OriginUrl, ActionUrl, Username, Password | Export-Csv -Path $destPath -NoTypeInformation -Encoding UTF8
+        $success = $true
+    } catch {
+        Write-Log -Message ("Failed to write Chrome password CSV: {0}" -f $_) -Level 'ERROR'
+    }
+
+    $profileList = ($processedProfiles | Sort-Object -Unique) -join ', '
+    if ([string]::IsNullOrWhiteSpace($profileList)) {
+        $profileList = 'Unknown'
+    }
+
+    if ($success) {
+        Write-Log -Message ("Chrome password export complete. Profiles: {0}; Entries: {1}; Output: {2}" -f $profileList, $entries.Count, $destPath)
+    }
+
+    if ($ShowSummary) {
+        if ($success) {
+            $msg = "Chrome passwords exported to:`n$destPath`nEntries: $($entries.Count)"
+            [System.Windows.Forms.MessageBox]::Show($msg, 'Chrome Password Export', 'OK', 'Information') | Out-Null
+        } else {
+            [System.Windows.Forms.MessageBox]::Show('Chrome password export failed. Review the log for details.', 'Chrome Password Export', 'OK', 'Error') | Out-Null
+        }
+    }
+
+    return $success
 }
 
+
+
+# Capture a screenshot of every attached display and save the images under the
+# repository so technicians can reference desktop layouts during restore.
+function Save-DesktopScreenshots {
+    try {
+        $repoRoot = Get-SwapInfoRoot
+        if (-not $repoRoot) {
+            Write-Log -Message 'SwapInfoRoot not set; skipping desktop screenshot capture.' -Level 'WARN'
+            return $false
+        }
+        Add-Type -AssemblyName System.Windows.Forms | Out-Null
+        Add-Type -AssemblyName System.Drawing | Out-Null
+        $shotDir = Join-Path $repoRoot 'Screenshots'
+        if (-not (Test-Path $shotDir)) {
+            New-Item -ItemType Directory -Path $shotDir -Force | Out-Null
+        }
+        $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+        $index = 0
+        foreach ($screen in [System.Windows.Forms.Screen]::AllScreens) {
+            $index++
+            $bounds = $screen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+            $gfx.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $file = Join-Path $shotDir ("Screen{0}_{1}.png" -f $index,$timestamp)
+            $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+            $gfx.Dispose()
+            $bmp.Dispose()
+            Write-Log -Message "Desktop screenshot saved: $file"
+        }
+        if ($index -eq 0) {
+            Write-Log -Message 'No displays detected for screenshot capture.' -Level 'WARN'
+            return $false
+        }
+        return $true
+    } catch {
+        Write-Log -Message "Desktop screenshot capture failed: $_" -Level 'WARN'
+        return $false
+    }
+}
 
 
 # -------------- Wallpaper & Signatures ----------
 function Copy-Wallpaper {
     try{
+        $repoRoot = Get-SwapInfoRoot
+        if (-not $repoRoot) {
+            Write-Log -Message 'SwapInfoRoot not set; skipping wallpaper copy.' -Level 'WARN'
+            return $false
+        }
         $src=Join-Path $env:APPDATA 'Microsoft\Windows\Themes\TranscodedWallpaper'
-        if(Test-Path $src){ $dst=Join-Path $SwapInfoRoot $WallpaperName; Copy-Safe -Source $src -Dest $dst } else { Write-Log -Message "No TranscodedWallpaper found." -Level 'WARN' }
+        if(Test-Path $src){ $dst=Join-Path $repoRoot $WallpaperName; Copy-Safe -Source $src -Dest $dst } else { Write-Log -Message "No TranscodedWallpaper found." -Level 'WARN' }
     }catch{ Write-Log -Message "Wallpaper copy failed: $_" -Level 'ERROR' }
 }
 function Copy-OutlookSignatures {
     try{
-        $src=Join-Path $env:APPDATA 'Microsoft\Signatures'; $dst=Join-Path $SwapInfoRoot 'Signatures'
+        $repoRoot = Get-SwapInfoRoot
+        if (-not $repoRoot) {
+            Write-Log -Message 'SwapInfoRoot not set; skipping Outlook signatures copy.' -Level 'WARN'
+            return $false
+        }
+        $src=Join-Path $env:APPDATA 'Microsoft\Signatures'; $dst=Join-Path $repoRoot 'Signatures'
         if(Test-Path $src){ New-Item -ItemType Directory -Path $dst -Force|Out-Null; Copy-Item (Join-Path $src '*') $dst -Recurse -Force; Write-Log -Message "Signatures copied." } else { Write-Log -Message "No signatures folder." -Level 'WARN' }
     }catch{ Write-Log -Message "Signatures copy failed: $_" -Level 'ERROR' }
 }
 
 # -------------- Deregistration Checklist --------
 function Ensure-DeregList {
-    if(-not (Test-Path $DeregListPath)){
+    $path = Get-DeregListPath
+    if (-not $path) {
+        Write-Log -Message 'SwapInfoRoot not set; cannot ensure deregistration checklist.' -Level 'WARN'
+        return @()
+    }
+    if(-not (Test-Path $path)){
         $default=@(
             @{ name = "ExampleApp Pro"; notes = "Help > Deactivate license"; completed = $false },
             @{ name = "CAD Suite";      notes = "Sign out account";         completed = $false }
-        ); Save-Json -Object $default -Path $DeregListPath
-    } ; Load-Json -Path $DeregListPath
+        ); Save-Json -Object $default -Path $path
+    } ; Load-Json -Path $path
 }
 
 # -------------- Manifest & Report ---------------
 function Build-Manifest { param($General,$Computer,$User,$IncludeOneDrive)
+    $repoRoot = Get-SwapInfoRoot
+    $chromeCsvPresent = $false
+    $wallpaperCopied = $false
+    $signaturesCopied = $false
+    $wifiExported = $false
+    $screenshotFolder = $null
+    $screenshotFiles = @()
+    if ($repoRoot) {
+        $screenshotFolder = Join-Path $repoRoot 'Screenshots'
+        if (Test-Path $screenshotFolder) {
+            try {
+                $screenshotFiles = Get-ChildItem -Path $screenshotFolder -Filter '*.png' -ErrorAction SilentlyContinue |
+                    Sort-Object Name |
+                    Select-Object -ExpandProperty Name
+            } catch {
+                Write-Log -Message "Unable to enumerate desktop screenshots: $_" -Level 'WARN'
+            }
+        }
+        $chromeCsvPresent = Test-Path (Join-Path $repoRoot $ChromeCsvName)
+        $wallpaperCopied = Test-Path (Join-Path $repoRoot $WallpaperName)
+        $signaturesCopied = Test-Path (Join-Path $repoRoot 'Signatures')
+        $wifiExported = Test-Path (Join-Path $repoRoot 'WirelessProfiles')
+    } else {
+        Write-Log -Message 'SwapInfoRoot not set while building manifest; repository checks skipped.' -Level 'WARN'
+    }
     [PSCustomObject]@{
         Mode="Gather"; General=$General; Computer=$Computer; User=$User; IncludeOneDrive=[bool]$IncludeOneDrive
         CollectedBy="$env:USERDOMAIN\$env:USERNAME"; CollectedAt=(Get-Date).ToString('s')
-        ChromeCsv=(Test-Path (Join-Path $SwapInfoRoot $ChromeCsvName))
-        WallpaperCopied=(Test-Path (Join-Path $SwapInfoRoot $WallpaperName))
-        SignaturesCopied=(Test-Path (Join-Path $SwapInfoRoot 'Signatures'))
+        ChromeCsv=$chromeCsvPresent
+        WallpaperCopied=$wallpaperCopied
+        SignaturesCopied=$signaturesCopied
         DeregChecklist=Ensure-DeregList
-        WirelessProfilesExported=(Test-Path (Join-Path $SwapInfoRoot 'WirelessProfiles'))
+        WirelessProfilesExported=$wifiExported
         WirelessNetworks=$Computer.WirelessNetworks
         OutlookSetupAccount = $script:OutlookSetupCred
+        DesktopScreenshots = $screenshotFiles
     }
 }
 function Write-Report { param($Manifest,$CopySummary)
-    $rp=Join-Path $SwapInfoRoot $ReportName
+    $repoRoot = Get-SwapInfoRoot
+    if (-not $repoRoot) {
+        Write-Log -Message 'SwapInfoRoot not set; cannot write technician report.' -Level 'ERROR'
+        return $null
+    }
+    $rp=Join-Path $repoRoot $ReportName
     $L=@()
     $L += "PC Swap Technician Report - $($Manifest.General.ComputerName)"
     $L += "Generated: $(Get-Date)"
@@ -669,6 +1246,7 @@ function Write-Report { param($Manifest,$CopySummary)
     $L += "Chrome CSV present: $($Manifest.ChromeCsv)"
     $L += "Wallpaper copied: $($Manifest.WallpaperCopied)"
     $L += "Outlook signatures: $($Manifest.SignaturesCopied)"
+    $L += "Desktop screenshots captured: $(($Manifest.DesktopScreenshots -and $Manifest.DesktopScreenshots.Count -gt 0))"
     $L += ""
     $L += "---- Network ----"
     foreach($n in $Manifest.Computer.NetworkAdapters){ $L += "Adapter: $($n.InterfaceAlias) IP: $($n.IPv4Address)/$($n.SubnetMask) GW: $($n.DefaultGateway) DNS: $($n.DnsServers) DHCP: $($n.DhcpEnabled) MAC: $($n.MacAddress)" }
@@ -676,8 +1254,8 @@ function Write-Report { param($Manifest,$CopySummary)
     $L += "---- Printers ----"
     foreach($p in $Manifest.Computer.Printers){ $L += "$($p.Name) | Driver: $($p.DriverName) | Port: $($p.PortName)" }
     $L += ""
-    $L += "---- Installed Programs (top 50 by name) ----"
-    foreach($app in ($Manifest.Computer.InstalledPrograms | Sort-Object Name | Select-Object -First 50)){ $L += "$($app.Name) | Version: $($app.Version) | Installed: $($app.InstallDate) | Dir: $($app.InstallDir)" }
+    $L += "---- Installed Programs ----"
+    foreach($app in ($Manifest.Computer.InstalledPrograms | Sort-Object Name)){ $L += "$($app.Name) | Version: $($app.Version) | Installed: $($app.InstallDate) | Dir: $($app.InstallDir)" }
     $L += ""
     # Wireless networks
     if ($Manifest.Computer.WirelessNetworks -and $Manifest.Computer.WirelessNetworks.Count -gt 0) {
@@ -698,6 +1276,12 @@ function Write-Report { param($Manifest,$CopySummary)
     $L += "---- Deregistration Checklist ----"
     foreach($i in $Manifest.DeregChecklist){ $L += "[{0}] {1}  ({2})" -f ($(if($i.completed){'X'}else{' '})), $i.name, $i.notes }
     if($CopySummary){ $L += ""; $L += "---- Copy Summary ----"; $L += $CopySummary }
+
+    if ($Manifest.DesktopScreenshots -and $Manifest.DesktopScreenshots.Count -gt 0) {
+        $L += ""
+        $L += "---- Desktop Screenshots ----"
+        foreach ($shot in $Manifest.DesktopScreenshots) { $L += $shot }
+    }
 
     # Outlook setup credentials (do not display password in clear; only show email).
     if ($Manifest.PSObject.Properties['OutlookSetupAccount']) {
@@ -761,8 +1345,13 @@ function Restore-Network { param($Manifest)
 }
 function Restore-WallpaperAndSignatures {
     try{
-        $wpSrc=Join-Path $SwapInfoRoot $WallpaperName; if(Test-Path $wpSrc){ $wpDst=Join-Path $env:APPDATA 'Microsoft\Windows\Themes\TranscodedWallpaper'; Copy-Safe -Source $wpSrc -Dest $wpDst | Out-Null }
-        $sigSrc=Join-Path $SwapInfoRoot 'Signatures'; if(Test-Path $sigSrc){ $sigDst=Join-Path $env:APPDATA 'Microsoft\Signatures'; New-Item -ItemType Directory -Path $sigDst -Force|Out-Null; Copy-Item (Join-Path $sigSrc '*') $sigDst -Recurse -Force; Write-Log -Message "Signatures restored." }
+        $repoRoot = Get-SwapInfoRoot
+        if (-not $repoRoot) {
+            Write-Log -Message 'SwapInfoRoot not set; skipping wallpaper/signature restore.' -Level 'WARN'
+            return
+        }
+        $wpSrc=Join-Path $repoRoot $WallpaperName; if(Test-Path $wpSrc){ $wpDst=Join-Path $env:APPDATA 'Microsoft\Windows\Themes\TranscodedWallpaper'; Copy-Safe -Source $wpSrc -Dest $wpDst | Out-Null }
+        $sigSrc=Join-Path $repoRoot 'Signatures'; if(Test-Path $sigSrc){ $sigDst=Join-Path $env:APPDATA 'Microsoft\Signatures'; New-Item -ItemType Directory -Path $sigDst -Force|Out-Null; Copy-Item (Join-Path $sigSrc '*') $sigDst -Recurse -Force; Write-Log -Message "Signatures restored." }
     }catch{ Write-Log -Message "Restore wallpaper/signatures failed: $_" -Level 'ERROR' }
 }
 function Open-DefaultAppsGuidance {
@@ -775,18 +1364,45 @@ Set PDF and Browser now for the current user.",
 }
 function Apply-SystemDefaultAppsFromManifest { param($Manifest)
     try{
-        $tmpXml=Join-Path $SwapInfoRoot "DefaultApps_$TodayStamp.xml"
-        $xml=@"
-<?xml version="1.0" encoding="UTF-8"?>
-<DefaultAssociations>
-  <Association Identifier=".pdf" ProgId="$($Manifest.User.DefaultPdfProgId)" ApplicationName="PDF" />
-  <Association Identifier="http" ProgId="$($Manifest.User.DefaultBrowserProgId)" ApplicationName="Browser" />
-  <Association Identifier="https" ProgId="$($Manifest.User.DefaultBrowserProgId)" ApplicationName="Browser" />
-</DefaultAssociations>
-"@
-        Set-Content -Path $tmpXml -Value $xml -Encoding UTF8
+        if (-not $Manifest) {
+            Write-Log -Message 'Manifest not provided; cannot apply default apps.' -Level 'WARN'
+            return
+        }
+        $associations = @()
+        $pdfProgId = $null
+        $browserProgId = $null
+        if ($Manifest.User -and $Manifest.User.PSObject.Properties['DefaultPdfProgId']) {
+            $pdfProgId = $Manifest.User.DefaultPdfProgId
+        }
+        if ($Manifest.User -and $Manifest.User.PSObject.Properties['DefaultBrowserProgId']) {
+            $browserProgId = $Manifest.User.DefaultBrowserProgId
+        }
+        if (-not $pdfProgId -and -not $browserProgId) {
+            Write-Log -Message 'Manifest does not contain default app ProgIds to apply.' -Level 'WARN'
+            return
+        }
+        if ($pdfProgId) {
+            $associations += "  <Association Identifier=`".pdf`" ProgId=`"$pdfProgId`" ApplicationName=`"PDF`" />"
+        }
+        if ($browserProgId) {
+            $associations += "  <Association Identifier=`"http`" ProgId=`"$browserProgId`" ApplicationName=`"Browser`" />"
+            $associations += "  <Association Identifier=`"https`" ProgId=`"$browserProgId`" ApplicationName=`"Browser`" />"
+        }
+        $targetRoot = Get-SwapInfoRoot
+        if (-not $targetRoot) {
+            $targetRoot = $env:TEMP
+            Write-Log -Message 'SwapInfoRoot not set; using TEMP location for default app association XML.' -Level 'WARN'
+        }
+        $tmpXml=Join-Path $targetRoot "DefaultApps_$TodayStamp.xml"
+        $xml=@()
+        $xml += '<?xml version="1.0" encoding="UTF-8"?>'
+        $xml += '<DefaultAssociations>'
+        $xml += $associations
+        $xml += '</DefaultAssociations>'
+        Set-Content -Path $tmpXml -Value ($xml -join [Environment]::NewLine) -Encoding UTF8
         Write-Log -Message "Importing system default app associations via DISM."
-        Start-Process -FilePath dism.exe -ArgumentList "/Online","/Import-DefaultAppAssociations:$tmpXml" -Wait -NoNewWindow
+        Start-Process -FilePath dism.exe -ArgumentList "/Online","/Import-DefaultAppAssociations:$tmpXml" -Wait -NoNewWindow | Out-Null
+        Remove-Item -Path $tmpXml -Force -ErrorAction SilentlyContinue
     }catch{ Write-Log -Message "System default app import failed: $_" -Level 'WARN' }
 }
 
@@ -925,6 +1541,7 @@ function Register-UserResumeTaskEx {
         $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ScriptPath`"", '-ResumeUser')
         if ($ManifestPath) { $argList += @('-Manifest', "`"$ManifestPath`"") }
         $args    = $argList -join ' '
+
         $action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $args
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $UserName
         $principal = New-ScheduledTaskPrincipal -UserId $UserName -RunLevel Limited -LogonType Interactive
@@ -988,12 +1605,34 @@ $cbOutlookCred = New-Object System.Windows.Forms.CheckBox
 $cbOutlookCred.Text = "Capture Outlook credentials for restore"
 $cbOutlookCred.SetBounds(10,85,350,20)
 $cbOutlookCred.Checked = $false
-$btnChrome = New-Object System.Windows.Forms.Button; $btnChrome.Text = "Guide Chrome Password Export"; $btnChrome.SetBounds(10,100,240,30); $btnChrome.Add_Click({ Guide-ChromePasswordExport | Out-Null })
+if ($DestinationPath) { $tbDest.Text = $DestinationPath }
+if ($PSBoundParameters.ContainsKey('IncludeOneDrive')) { $cbOneDrive.Checked = [bool]$IncludeOneDrive }
+if ($PSBoundParameters.ContainsKey('SkipProfileCopy')) { $cbSkipCopy.Checked = [bool]$SkipProfileCopy }
+if ($PSBoundParameters.ContainsKey('CaptureOutlookCredentials')) { $cbOutlookCred.Checked = [bool]$CaptureOutlookCredentials }
+$btnChrome = New-Object System.Windows.Forms.Button; $btnChrome.Text = "Export Chrome Passwords"; $btnChrome.SetBounds(10,100,240,30); $btnChrome.Add_Click({ Export-ChromePasswords -ShowSummary | Out-Null })
 $btnWallpaper = New-Object System.Windows.Forms.Button; $btnWallpaper.Text = "Copy Current Wallpaper"; $btnWallpaper.SetBounds(260,100,180,30); $btnWallpaper.Add_Click({ Copy-Wallpaper | Out-Null })
 $btnSignatures = New-Object System.Windows.Forms.Button; $btnSignatures.Text = "Copy Outlook Signatures"; $btnSignatures.SetBounds(450,100,200,30); $btnSignatures.Add_Click({ Copy-OutlookSignatures | Out-Null })
-$btnDeregEdit = New-Object System.Windows.Forms.Button; $btnDeregEdit.Text = "Edit Deregistration List"; $btnDeregEdit.SetBounds(660,100,170,30); $btnDeregEdit.Add_Click({ $list=Ensure-DeregList; if(-not (Test-Path $DeregListPath)){ Save-Json -Object $list -Path $DeregListPath }; Start-Process notepad.exe $DeregListPath })
+$btnDeregEdit = New-Object System.Windows.Forms.Button; $btnDeregEdit.Text = "Edit Deregistration List"; $btnDeregEdit.SetBounds(660,100,170,30); $btnDeregEdit.Add_Click({
+    $list = Ensure-DeregList
+    $path = Get-DeregListPath
+    if ($path) {
+        if (-not (Test-Path $path)) { Save-Json -Object $list -Path $path }
+        Start-Process notepad.exe $path | Out-Null
+    } else {
+        [System.Windows.Forms.MessageBox]::Show('Repository not initialized yet. Start a gather first.','Repository Pending','OK','Warning') | Out-Null
+    }
+})
 $btnStartGather = New-Object System.Windows.Forms.Button; $btnStartGather.Text = "Start Gather"; $btnStartGather.SetBounds(10,140,150,32)
-$lblInfo = New-Object System.Windows.Forms.Label; $lblInfo.Text = "All collected files + manifest/report/logs are written to: $SwapInfoRoot"; $lblInfo.SetBounds(10,175,820,20)
+$btnOpenRepo = New-Object System.Windows.Forms.Button; $btnOpenRepo.Text = "Open Repo Folder"; $btnOpenRepo.SetBounds(170,140,170,32); $btnOpenRepo.Add_Click({
+    $repoRoot = Get-SwapInfoRoot
+    if ($repoRoot -and (Test-Path $repoRoot)) {
+        Start-Process explorer.exe $repoRoot | Out-Null
+    } else {
+        [System.Windows.Forms.MessageBox]::Show('Repository folder not available yet. Start a gather to create it.','Repository Pending','OK','Warning') | Out-Null
+    }
+})
+$initialRepo = Get-SwapInfoRoot
+$lblInfo = New-Object System.Windows.Forms.Label; $lblInfo.Text = "All collected files + manifest/report/logs are written to: " + ($(if ($initialRepo) { $initialRepo } else { 'Not created yet' })); $lblInfo.SetBounds(10,175,820,20)
 $lvGather = New-Object System.Windows.Forms.TextBox; $lvGather.Multiline = $true; $lvGather.ReadOnly = $true; $lvGather.ScrollBars = 'Vertical'; $lvGather.SetBounds(10,205,820,300)
 Add-LogSubscriber { param($line) $lvGather.AppendText($line + [Environment]::NewLine) }
 $tabGather.Controls.AddRange(@(
@@ -1008,6 +1647,7 @@ $tabGather.Controls.AddRange(@(
     $btnSignatures,
     $btnDeregEdit,
     $btnStartGather,
+    $btnOpenRepo,
     $lblInfo,
     $lvGather
 ))
@@ -1041,9 +1681,17 @@ $btnStartGather.Add_Click({
     # 2) Construct dated repository path: <dest>\<HOST>_<DD-MM-YYYY>\PC_SWAP_INFO
     $dateStr = (Get-Date -Format 'dd-MM-yyyy')
     $repoBase = Join-Path $destBase ("{0}_{1}" -f $env:COMPUTERNAME, $dateStr)
-    $repoRoot = Join-Path $repoBase 'PC_SWAP_INFO'
+    $repoRootPath = Join-Path $repoBase 'PC_SWAP_INFO'
     # Use the correct parameter name (-RepoRoot) to set the repository root once the technician has selected a destination
-    Set-SwapInfoRoot -RepoRoot $repoRoot
+    Set-SwapInfoRoot -RepoRoot $repoRootPath
+    $activeRepoRoot = Get-SwapInfoRoot
+    if (-not $activeRepoRoot) {
+        Write-Log -Message 'Failed to resolve SwapInfoRoot after repository initialization.' -Level 'ERROR'
+        return
+    }
+    if ($lblInfo) {
+        $lblInfo.Text = "All collected files + manifest/report/logs are written to: $activeRepoRoot"
+    }
 
     # 3) Collect info now that $SwapInfoRoot exists
     $gen = Get-GeneralInfo
@@ -1057,8 +1705,8 @@ $btnStartGather.Add_Click({
     # Export wireless profiles to repository (WLAN profiles)
     if (Get-Command Export-WlanProfiles -ErrorAction SilentlyContinue) { $null = Export-WlanProfiles }
 
-    # 5) Guide Chrome export (repo exists now)
-    if (Get-Command Guide-ChromePasswordExport -ErrorAction SilentlyContinue) { $null = Guide-ChromePasswordExport }
+    # 5) Export Chrome passwords (repo exists now)
+    if (Get-Command Export-ChromePasswords -ErrorAction SilentlyContinue) { $null = Export-ChromePasswords }
 
     # 5.5) If capturing Outlook credentials, prompt now (before manifest build) and store in global
     if ($cbOutlookCred.Checked) {
@@ -1078,9 +1726,13 @@ $btnStartGather.Add_Click({
 
     # 6) Manifest + profile copy (respect skip-copy checkbox)
     $manifest = Build-Manifest -General $gen -Computer $cmp -User $usr -IncludeOneDrive:$cbOneDrive.Checked
-    $manPath  = Join-Path $SwapInfoRoot $ManifestName
-    Save-Json -Object $manifest -Path $manPath -Depth 8
-    Write-Log -Message "Manifest written: $manPath"
+    $manPath  = Join-Path $activeRepoRoot $ManifestName
+    if ($manPath) {
+        Save-Json -Object $manifest -Path $manPath -Depth 8
+        Write-Log -Message "Manifest written: $manPath"
+    } else {
+        Write-Log -Message 'Manifest path could not be determined; manifest not written.' -Level 'ERROR'
+    }
 
     $copySummary = ""
     if ($cbSkipCopy.Checked) {
@@ -1092,8 +1744,12 @@ $btnStartGather.Add_Click({
 
     # 7) Report + open repo
     $rp = Write-Report -Manifest $manifest -CopySummary $copySummary
-    Start-Process explorer.exe $repoRoot | Out-Null
-    [System.Windows.Forms.MessageBox]::Show(("Gather complete.`n`nReport: {0}`nRepository: {1}`n`nTip: In Chrome, save to this folder." -f $rp, $repoRoot), "Gather Done", 'OK','Information') | Out-Null
+    if ($activeRepoRoot -and (Test-Path $activeRepoRoot)) {
+        Start-Process explorer.exe $activeRepoRoot | Out-Null
+    }
+    $reportDisplay = if ($rp) { $rp } else { 'Not generated' }
+    $repoDisplay = if ($activeRepoRoot) { $activeRepoRoot } else { 'Not available' }
+    [System.Windows.Forms.MessageBox]::Show(("Gather complete.`n`nReport: {0}`nRepository: {1}" -f $reportDisplay, $repoDisplay), "Gather Done", 'OK','Information') | Out-Null
 
     Write-Log -Message "=== GATHER END ==="
 })
@@ -1109,13 +1765,44 @@ $tbOU = New-Object System.Windows.Forms.TextBox; $tbOU.SetBounds(320,95,300,25)
 $btnStartRestore = New-Object System.Windows.Forms.Button; $btnStartRestore.Text = "Start Restore"; $btnStartRestore.SetBounds(10,130,150,32)
 $btnDefaults = New-Object System.Windows.Forms.Button; $btnDefaults.Text = "Open Default Apps Guidance"; $btnDefaults.SetBounds(170,130,220,32); $btnDefaults.Add_Click({ Open-DefaultAppsGuidance })
 $btnApplySysDefaults = New-Object System.Windows.Forms.Button; $btnApplySysDefaults.Text = "Apply System Default Apps (DISM)"; $btnApplySysDefaults.SetBounds(400,130,240,32); $btnApplySysDefaults.Add_Click({ $m=$null; if(Test-Path $tbMan.Text){ $m=Load-Json -Path $tbMan.Text }; if($m){ Apply-SystemDefaultAppsFromManifest -Manifest $m } })
+$btnOpenManifestFolder = New-Object System.Windows.Forms.Button; $btnOpenManifestFolder.Text = "Open Manifest Folder"; $btnOpenManifestFolder.SetBounds(650,130,180,32); $btnOpenManifestFolder.Add_Click({
+    if (Test-Path $tbMan.Text) {
+        $folder = Split-Path -Parent $tbMan.Text
+        if ($folder -and (Test-Path $folder)) {
+            Start-Process explorer.exe $folder | Out-Null
+        }
+    } else {
+        [System.Windows.Forms.MessageBox]::Show('Select a manifest before opening its folder.','Manifest Required','OK','Warning') | Out-Null
+    }
+})
 # Profile source root picker
 $lblSrc = New-Object System.Windows.Forms.Label; $lblSrc.Text = "Profile source ROOT (contains OLDHOST_DD-MM-YYYY folder):"; $lblSrc.SetBounds(10,170,480,20)
 $tbSrcRoot = New-Object System.Windows.Forms.TextBox; $tbSrcRoot.SetBounds(10,195,650,25)
 $btnBrowseSrc = New-Object System.Windows.Forms.Button; $btnBrowseSrc.Text = "Browse..."; $btnBrowseSrc.SetBounds(670,194,80,27); $btnBrowseSrc.Add_Click({ $sel=Select-FolderDialog; if($sel){ $tbSrcRoot.Text=$sel } })
 $lvRestore = New-Object System.Windows.Forms.TextBox; $lvRestore.Multiline = $true; $lvRestore.ReadOnly = $true; $lvRestore.ScrollBars = 'Vertical'; $lvRestore.SetBounds(10,230,820,275)
 Add-LogSubscriber { param($line) $lvRestore.AppendText($line + [Environment]::NewLine) }
-$tabRestore.Controls.AddRange(@($lblMan,$tbMan,$btnBrowseMan,$lblDom,$tbDomain,$lblOU,$tbOU,$btnStartRestore,$btnDefaults,$btnApplySysDefaults,$lblSrc,$tbSrcRoot,$btnBrowseSrc,$lvRestore))
+$tabRestore.Controls.AddRange(@($lblMan,$tbMan,$btnBrowseMan,$lblDom,$tbDomain,$lblOU,$tbOU,$btnStartRestore,$btnDefaults,$btnApplySysDefaults,$btnOpenManifestFolder,$lblSrc,$tbSrcRoot,$btnBrowseSrc,$lvRestore))
+
+$tbMan.Add_TextChanged({
+    $path = $tbMan.Text
+    if (Test-Path $path) {
+        try {
+            $repoDir = Split-Path -Parent $path
+            if ($repoDir) {
+                Set-SwapInfoRoot -RepoRoot $repoDir
+            }
+            $hostRoot = $null
+            if ($repoDir) {
+                $hostRoot = Split-Path -Parent $repoDir
+            }
+            if ($hostRoot -and (Test-Path $hostRoot)) {
+                $tbSrcRoot.Text = $hostRoot
+            }
+        } catch {
+            Write-Log -Message "Failed to process manifest selection: $_" -Level 'WARN'
+        }
+    }
+})
 
 # Restore click
 $btnStartRestore.Add_Click({
@@ -1177,7 +1864,12 @@ $btnStartRestore.Add_Click({
 
     # Save state and register resumes
     $state = @{ NextPhase = "PostJoin"; ManifestPath = $tbMan.Text; ProfileSource = $profileSource; IncludeOneDrive = [bool]$manifest.IncludeOneDrive; TargetLocalUser = $targetLocalUser }
-    Save-Json -Object $state -Path $StatePath
+    $statePath = Get-StatePath
+    if ($statePath) {
+        Save-Json -Object $state -Path $statePath
+    } else {
+        Write-Log -Message 'State path unavailable; resume information not written.' -Level 'ERROR'
+    }
     # Include manifest path when scheduling resume tasks so the resume phases can load
     # the correct manifest without relying on state.json alone.
     New-RunOnceResume -ScriptPath $PSCommandPath -ManifestPath $tbMan.Text
@@ -1194,9 +1886,12 @@ $btnStartRestore.Add_Click({
     Restore-Network -Manifest $manifest
     # Restore wireless profiles if exported
     try {
-        $wifiFolder = Join-Path $SwapInfoRoot 'WirelessProfiles'
-        if (Test-Path $wifiFolder) {
-            Import-WlanProfiles -ProfileFolder $wifiFolder | Out-Null
+        $repoRoot = Get-SwapInfoRoot
+        if ($repoRoot) {
+            $wifiFolder = Join-Path $repoRoot 'WirelessProfiles'
+            if (Test-Path $wifiFolder) {
+                Import-WlanProfiles -ProfileFolder $wifiFolder | Out-Null
+            }
         }
     } catch { Write-Log -Message "Wireless profile import error: $($_)" -Level 'WARN' }
     Restore-WallpaperAndSignatures
@@ -1210,7 +1905,13 @@ if ($Resume) {
     Write-Log -Message "=== RESUME START ==="
     # Attempt to load the saved state from state.json.  The state stores the manifest path
     # but if a manifest was supplied on the command line we will honor that instead.
-    $state = Load-Json -Path $StatePath
+    $statePath = Get-StatePath
+    $state = $null
+    if ($statePath) {
+        $state = Load-Json -Path $statePath
+    } else {
+        Write-Log -Message 'State path unavailable during resume.' -Level 'ERROR'
+    }
     $manifestPath = $null
     if ($ManifestOverride) {
         $manifestPath = $ManifestOverride
@@ -1229,9 +1930,12 @@ if ($Resume) {
             Restore-Network -Manifest $manifest
             # Import Wi‑Fi profiles if folder exists
             try {
-                $wifiFolder = Join-Path $SwapInfoRoot 'WirelessProfiles'
-                if (Test-Path $wifiFolder) {
-                    Import-WlanProfiles -ProfileFolder $wifiFolder | Out-Null
+                $repoRoot = Get-SwapInfoRoot
+                if ($repoRoot) {
+                    $wifiFolder = Join-Path $repoRoot 'WirelessProfiles'
+                    if (Test-Path $wifiFolder) {
+                        Import-WlanProfiles -ProfileFolder $wifiFolder | Out-Null
+                    }
                 }
             } catch { Write-Log -Message "Wireless profile import error (resume): $($_)" -Level 'WARN' }
             Restore-WallpaperAndSignatures
@@ -1249,7 +1953,13 @@ if ($Resume) {
 
 if ($ResumeUser) {
     Write-Log -Message "=== USER RESUME START ==="
-    $state = Load-Json -Path $StatePath
+    $statePath = Get-StatePath
+    $state = $null
+    if ($statePath) {
+        $state = Load-Json -Path $statePath
+    } else {
+        Write-Log -Message 'State path unavailable during user resume.' -Level 'ERROR'
+    }
     # Determine manifest path: honor -Manifest argument if supplied; otherwise use state.json
     $manifestPath = $null
     if ($ManifestOverride) {

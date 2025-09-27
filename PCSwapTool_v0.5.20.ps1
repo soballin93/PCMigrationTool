@@ -2,7 +2,8 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.21 (2025-09-27)
+    Version: 0.5.22 (2025-09-27)
+
 
 .DESCRIPTION
     A WinForms GUI PowerShell tool to gather migration data from a Windows 10/11 machine,
@@ -10,6 +11,13 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.22
+      - Change: Skip creating the Chrome password CSV when no credentials can be
+        decrypted and remove any stale export so manifests remain accurate.
+      - Improvement: Surface the "no credentials" outcome without treating it as
+        a successful export, preventing empty files from appearing in the
+        repository.
+      - Date: 2025-09-27
     0.5.21
       - Fix: Initialize the ProtectedDataReady flag before first use so Chrome password
         export no longer fails under StrictMode when the ProtectedData type is loaded
@@ -168,7 +176,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.21'
+$ProgramVersion = '0.5.22'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -1067,20 +1075,19 @@ function Export-ChromePasswords {
     $destPath = Join-Path $repoRoot $ChromeCsvName
 
     if ($entries.Count -eq 0) {
-        try {
-            '"Profile","OriginUrl","ActionUrl","Username","Password"' | Set-Content -Path $destPath -Encoding UTF8
-            Write-Log -Message ("Chrome password export completed; no decryptable credentials were found. Created empty CSV at {0}" -f $destPath)
-            if ($ShowSummary) {
-                [System.Windows.Forms.MessageBox]::Show('No Chrome passwords were found. An empty export file was created.', 'Chrome Password Export', 'OK', 'Information') | Out-Null
+        if (Test-Path $destPath) {
+            try {
+                Remove-Item -Path $destPath -Force -ErrorAction Stop
+            } catch {
+                Write-Log -Message ("Failed to remove stale Chrome password CSV at {0}: {1}" -f $destPath, $_) -Level 'WARN'
             }
-            return $true
-        } catch {
-            Write-Log -Message ("Failed to create empty Chrome password CSV: {0}" -f $_) -Level 'ERROR'
-            if ($ShowSummary) {
-                [System.Windows.Forms.MessageBox]::Show('Chrome password export failed while creating an empty CSV. See log for details.', 'Chrome Password Export', 'OK', 'Error') | Out-Null
-            }
-            return $false
         }
+
+        Write-Log -Message 'Chrome password export completed; no decryptable credentials were found. No CSV was created.' -Level 'WARN'
+        if ($ShowSummary) {
+            [System.Windows.Forms.MessageBox]::Show('No Chrome passwords were decrypted. No export file was created.', 'Chrome Password Export', 'OK', 'Warning') | Out-Null
+        }
+        return $false
     }
 
     $success = $false

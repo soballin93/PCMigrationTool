@@ -594,7 +594,7 @@ function Get-ChromeExecutablePath {
 
     $candidates = @()
     if ($env:ProgramFiles) { $candidates += Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe' }
-    $programFilesX86 = $env:'ProgramFiles(x86)'
+    $programFilesX86 = ${env:ProgramFiles(x86)}
     if ($programFilesX86) { $candidates += Join-Path $programFilesX86 'Google\Chrome\Application\chrome.exe' }
     if ($env:LOCALAPPDATA) { $candidates += Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe' }
 
@@ -619,7 +619,7 @@ function Get-ChromeExecutablePath {
                 }
             }
         } catch {
-            Write-Log -Message "Failed to read Chrome path from $regRoot: $($_)" -Level 'WARN'
+            Write-Log -Message "Failed to read Chrome path from ${regRoot}: $($_)" -Level 'WARN'
         }
     }
 
@@ -770,7 +770,7 @@ function Show-ChromePasswordExportGuide {
             Write-Log -Message "Launched Chrome at $launchUrl using resolved path: $chromePath"
             $chromeLaunched = $true
         } catch {
-            Write-Log -Message "Failed to launch Chrome using resolved path $chromePath: $($_)" -Level 'WARN'
+            Write-Log -Message "Failed to launch Chrome using resolved path ${chromePath}: $($_)" -Level 'WARN'
         }
     }
 

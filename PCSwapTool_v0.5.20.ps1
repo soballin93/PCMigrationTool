@@ -2,7 +2,7 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.22 (2025-09-27)
+    Version: 0.5.24 (2025-09-27)
 
 
 .DESCRIPTION
@@ -11,6 +11,16 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.24
+      - Fix: Instantiate the Chrome AES key parameter without splatting individual
+        bytes so BouncyCastle accepts 32-byte keys on newer builds.
+      - Date: 2025-09-27
+    0.5.23
+      - Fix: Treat Chrome secrets with any "vXX" prefix as AES-GCM so newer Chrome
+        builds decrypt correctly instead of falling back to DPAPI and failing.
+      - Fix: Retry DPAPI secrets with the LocalMachine scope when CurrentUser
+        decryption is unavailable, covering service and system profiles.
+      - Date: 2025-09-27
     0.5.22
       - Change: Skip creating the Chrome password CSV when no credentials can be
         decrypted and remove any stale export so manifests remain accurate.
@@ -176,7 +186,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.22'
+$ProgramVersion = '0.5.24'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -906,7 +916,7 @@ function ConvertFrom-ChromeSecret {
     $prefix = if ($Data.Length -ge 3) { [System.Text.Encoding]::ASCII.GetString($Data, 0, 3) } else { '' }
 
     try {
-        if ($prefix -in @('v10','v11','v12')) {
+        if ($prefix -and ($prefix -match '^v\d{2}$')) {
             if (-not $Key -or $Key.Length -eq 0) {
                 return ''
             }
@@ -928,7 +938,7 @@ function ConvertFrom-ChromeSecret {
 
             $engine = New-Object Org.BouncyCastle.Crypto.Engines.AesEngine
             $cipher = New-Object Org.BouncyCastle.Crypto.Modes.GcmBlockCipher ($engine)
-            $keyParam = New-Object Org.BouncyCastle.Crypto.Parameters.KeyParameter ($Key)
+            $keyParam = [Org.BouncyCastle.Crypto.Parameters.KeyParameter]::new($Key)
             $parameters = New-Object Org.BouncyCastle.Crypto.Parameters.AeadParameters ($keyParam, 128, $nonce, $null)
             $cipher.Init($false, $parameters)
 
@@ -942,11 +952,28 @@ function ConvertFrom-ChromeSecret {
         if (-not (Ensure-ProtectedDataSupport)) {
             return ''
         }
-        $dpapiBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
-            $Data,
-            $null,
-            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
-        )
+
+        $dpapiBytes = $null
+        $lastError = $null
+        foreach ($scope in @([System.Security.Cryptography.DataProtectionScope]::CurrentUser, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)) {
+            try {
+                $dpapiBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+                    $Data,
+                    $null,
+                    $scope
+                )
+                $lastError = $null
+                break
+            } catch {
+                $lastError = $_
+                $dpapiBytes = $null
+            }
+        }
+
+        if ($null -eq $dpapiBytes) {
+            if ($lastError) { throw $lastError }
+            return ''
+        }
         return ([System.Text.Encoding]::UTF8.GetString($dpapiBytes)).TrimEnd([char]0)
     } catch {
         Write-Log -Message ("Failed to decrypt Chrome secret: {0}" -f $_) -Level 'WARN'

@@ -5,6 +5,7 @@
     Version: 0.5.25 (2025-09-27)
 
 
+
 .DESCRIPTION
     A WinForms GUI PowerShell tool to gather migration data from a Windows 10/11 machine,
     produce a technician report and a machine-readable manifest, and restore/apply that data
@@ -15,6 +16,7 @@
       - Fix: Fall back to DPAPI when Chrome AES-GCM secrets fail authentication
         so legacy DPAPI entries with "vXX" prefixes still decrypt correctly.
       - Date: 2025-09-27
+
     0.5.24
       - Fix: Instantiate the Chrome AES key parameter without splatting individual
         bytes so BouncyCastle accepts 32-byte keys on newer builds.
@@ -922,6 +924,7 @@ function ConvertFrom-ChromeSecret {
     try {
         $isVersioned = $prefix -and ($prefix -match '^v\d{2}$')
         if ($isVersioned -and $Key -and $Key.Length -gt 0 -and (Ensure-BouncyCastleAssembly)) {
+
             $nonceLength = 12
             if ($Data.Length -ge (3 + $nonceLength + 16)) {
                 try {
@@ -937,6 +940,7 @@ function ConvertFrom-ChromeSecret {
                     $keyParam = [Org.BouncyCastle.Crypto.Parameters.KeyParameter]::new($Key)
                     $parameters = New-Object Org.BouncyCastle.Crypto.Parameters.AeadParameters ($keyParam, 128, $nonce, $null)
                     $cipher.Init($false, $parameters)
+
 
                     $output = New-Object byte[] ($cipher.GetOutputSize($cipherTextAndTag.Length))
                     $bytesProcessed = $cipher.ProcessBytes($cipherTextAndTag, 0, $cipherTextAndTag.Length, $output, 0)

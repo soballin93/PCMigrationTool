@@ -2,7 +2,8 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.23 (2025-09-27)
+    Version: 0.5.24 (2025-09-27)
+
 
 
 .DESCRIPTION
@@ -11,6 +12,10 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.24
+      - Fix: Instantiate the Chrome AES key parameter without splatting individual
+        bytes so BouncyCastle accepts 32-byte keys on newer builds.
+      - Date: 2025-09-27
     0.5.23
       - Fix: Treat Chrome secrets with any "vXX" prefix as AES-GCM so newer Chrome
         builds decrypt correctly instead of falling back to DPAPI and failing.
@@ -182,7 +187,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.23'
+$ProgramVersion = '0.5.24'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -934,7 +939,7 @@ function ConvertFrom-ChromeSecret {
 
             $engine = New-Object Org.BouncyCastle.Crypto.Engines.AesEngine
             $cipher = New-Object Org.BouncyCastle.Crypto.Modes.GcmBlockCipher ($engine)
-            $keyParam = New-Object Org.BouncyCastle.Crypto.Parameters.KeyParameter ($Key)
+            $keyParam = [Org.BouncyCastle.Crypto.Parameters.KeyParameter]::new($Key)
             $parameters = New-Object Org.BouncyCastle.Crypto.Parameters.AeadParameters ($keyParam, 128, $nonce, $null)
             $cipher.Init($false, $parameters)
 

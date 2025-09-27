@@ -187,6 +187,7 @@ $script:ToolRoot = try {
 } catch {
     (Get-Location).Path
 }
+
 $script:DependencyCacheRoot = try {
     Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath 'PCSwapTool'
 } catch {
@@ -197,6 +198,7 @@ $script:ResourceDownloadBaseUrl = if ([string]::IsNullOrWhiteSpace($env:PCSwapTo
 } else {
     $env:PCSwapToolResourceBaseUrl
 }
+
 $script:SqliteAssemblyLoaded   = $false
 $script:BouncyCastleLoaded     = $false
 
@@ -718,6 +720,7 @@ function Invoke-DownloadToolResource {
     }
 }
 
+
 function Get-ToolResourcePath {
     [CmdletBinding()]
     param([Parameter(Mandatory=$true)][string]$FileName)
@@ -733,6 +736,7 @@ function Get-ToolResourcePath {
     if ($script:DependencyCacheRoot) {
         $candidates += (Join-Path -Path $script:DependencyCacheRoot -ChildPath $FileName)
     }
+
 
     foreach ($candidate in $candidates | Select-Object -Unique) {
         try {
@@ -750,6 +754,7 @@ function Get-ToolResourcePath {
             return $downloadedPath
         }
     }
+
 
     return $null
 }

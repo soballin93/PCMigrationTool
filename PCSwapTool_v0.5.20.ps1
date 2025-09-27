@@ -742,8 +742,8 @@ function Write-Report { param($Manifest,$CopySummary)
     $L += "---- Printers ----"
     foreach($p in $Manifest.Computer.Printers){ $L += "$($p.Name) | Driver: $($p.DriverName) | Port: $($p.PortName)" }
     $L += ""
-    $L += "---- Installed Programs (top 50 by name) ----"
-    foreach($app in ($Manifest.Computer.InstalledPrograms | Sort-Object Name | Select-Object -First 50)){ $L += "$($app.Name) | Version: $($app.Version) | Installed: $($app.InstallDate) | Dir: $($app.InstallDir)" }
+    $L += "---- Installed Programs ----"
+    foreach($app in ($Manifest.Computer.InstalledPrograms | Sort-Object Name)){ $L += "$($app.Name) | Version: $($app.Version) | Installed: $($app.InstallDate) | Dir: $($app.InstallDir)" }
     $L += ""
     # Wireless networks
     if ($Manifest.Computer.WirelessNetworks -and $Manifest.Computer.WirelessNetworks.Count -gt 0) {

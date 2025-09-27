@@ -790,7 +790,7 @@ function Show-ChromePasswordExportGuide {
     }
 
     $instructions = @"
-Chrome passwords must be exported manually by the technician.
+Chrome passwords must be exported manually:
 
 1. Chrome should open automatically to chrome://settings/passwords. If it does not, open Google Chrome and browse to that address.
 2. In ""Saved Passwords"", open the three-dot menu and choose ""Export passwords"".

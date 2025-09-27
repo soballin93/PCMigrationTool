@@ -2,7 +2,8 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.29 (2025-09-30)
+    Version: 0.5.30 (2025-10-01)
+
 
 
 
@@ -12,6 +13,10 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.30
+      - Fix: Prevent resume logging from triggering invalid variable reference errors
+        when the script runs from an in-memory invocation.
+      - Date: 2025-10-01
     0.5.29
       - Fix: Persist the script to a local cache when invoked from memory so
         restore resume tasks have a valid file path when scheduled.
@@ -211,7 +216,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.29'
+$ProgramVersion = '0.5.30'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -620,7 +625,7 @@ function Get-ExecutableScriptPath {
                 return $candidate
             }
         } catch {
-            Write-Log -Message "Failed to validate script path candidate $candidate: $_" -Level 'WARN'
+            Write-Log -Message ("Failed to validate script path candidate {0}: {1}" -f $candidate, $_) -Level 'WARN'
         }
     }
 
@@ -631,7 +636,7 @@ function Get-ExecutableScriptPath {
     }
 
     $definition = try { $scriptBlock.ToString() } catch {
-        Write-Log -Message "Failed to extract script definition for persistence: $_" -Level 'ERROR'
+        Write-Log -Message ("Failed to extract script definition for persistence: {0}" -f $_) -Level 'ERROR'
         $null
     }
     if ([string]::IsNullOrWhiteSpace($definition)) {
@@ -653,7 +658,7 @@ function Get-ExecutableScriptPath {
             New-Item -ItemType Directory -Path $baseDir -Force | Out-Null
         }
     } catch {
-        Write-Log -Message "Failed to ensure script cache directory $baseDir: $_" -Level 'ERROR'
+        Write-Log -Message ("Failed to ensure script cache directory {0}: {1}" -f $baseDir, $_) -Level 'ERROR'
         return $null
     }
 
@@ -665,7 +670,7 @@ function Get-ExecutableScriptPath {
         $global:PersistedScriptPath = $script:PersistedScriptPath
         return $persistPath
     } catch {
-        Write-Log -Message "Failed to persist script for resume scheduling: $_" -Level 'ERROR'
+        Write-Log -Message ("Failed to persist script for resume scheduling: {0}" -f $_) -Level 'ERROR'
         return $null
     }
 }

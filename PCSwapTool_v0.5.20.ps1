@@ -201,6 +201,15 @@ function Ensure-Repository {
     $dateStr = Get-Date -Format 'dd-MM-yyyy'
     $repo    = Join-Path $BasePath ("{0}_{1}" -f $env:COMPUTERNAME,$dateStr)
     $root    = Join-Path $repo 'PC_SWAP_INFO'
+    try {
+        if (-not (Test-Path $repo)) {
+            New-Item -ItemType Directory -Path $repo -Force | Out-Null
+            Write-Log -Message "Created repository host folder: $repo"
+        }
+    } catch {
+        Write-Log -Message "Failed to prepare repository host folder $repo : $($_)" -Level 'ERROR'
+        return $null
+    }
     Set-SwapInfoRoot -RepoRoot $root
     if ($OpenFolder) { Start-Process explorer.exe $root | Out-Null }
     return $root
@@ -619,6 +628,46 @@ Click OK here after saving.", "Chrome Export", 'OK','Information') | Out-Null
 
 
 
+# Capture a screenshot of every attached display and save the images under the
+# repository so technicians can reference desktop layouts during restore.
+function Save-DesktopScreenshots {
+    try {
+        if (-not $SwapInfoRoot) {
+            Write-Log -Message 'SwapInfoRoot not set; skipping desktop screenshot capture.' -Level 'WARN'
+            return $false
+        }
+        Add-Type -AssemblyName System.Windows.Forms | Out-Null
+        Add-Type -AssemblyName System.Drawing | Out-Null
+        $shotDir = Join-Path $SwapInfoRoot 'Screenshots'
+        if (-not (Test-Path $shotDir)) {
+            New-Item -ItemType Directory -Path $shotDir -Force | Out-Null
+        }
+        $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+        $index = 0
+        foreach ($screen in [System.Windows.Forms.Screen]::AllScreens) {
+            $index++
+            $bounds = $screen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+            $gfx.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $file = Join-Path $shotDir ("Screen{0}_{1}.png" -f $index,$timestamp)
+            $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+            $gfx.Dispose()
+            $bmp.Dispose()
+            Write-Log -Message "Desktop screenshot saved: $file"
+        }
+        if ($index -eq 0) {
+            Write-Log -Message 'No displays detected for screenshot capture.' -Level 'WARN'
+            return $false
+        }
+        return $true
+    } catch {
+        Write-Log -Message "Desktop screenshot capture failed: $_" -Level 'WARN'
+        return $false
+    }
+}
+
+
 # -------------- Wallpaper & Signatures ----------
 function Copy-Wallpaper {
     try{
@@ -645,6 +694,17 @@ function Ensure-DeregList {
 
 # -------------- Manifest & Report ---------------
 function Build-Manifest { param($General,$Computer,$User,$IncludeOneDrive)
+    $screenshotFolder = Join-Path $SwapInfoRoot 'Screenshots'
+    $screenshotFiles = @()
+    if (Test-Path $screenshotFolder) {
+        try {
+            $screenshotFiles = Get-ChildItem -Path $screenshotFolder -Filter '*.png' -ErrorAction SilentlyContinue |
+                Sort-Object Name |
+                Select-Object -ExpandProperty Name
+        } catch {
+            Write-Log -Message "Unable to enumerate desktop screenshots: $_" -Level 'WARN'
+        }
+    }
     [PSCustomObject]@{
         Mode="Gather"; General=$General; Computer=$Computer; User=$User; IncludeOneDrive=[bool]$IncludeOneDrive
         CollectedBy="$env:USERDOMAIN\$env:USERNAME"; CollectedAt=(Get-Date).ToString('s')
@@ -655,6 +715,7 @@ function Build-Manifest { param($General,$Computer,$User,$IncludeOneDrive)
         WirelessProfilesExported=(Test-Path (Join-Path $SwapInfoRoot 'WirelessProfiles'))
         WirelessNetworks=$Computer.WirelessNetworks
         OutlookSetupAccount = $script:OutlookSetupCred
+        DesktopScreenshots = $screenshotFiles
     }
 }
 function Write-Report { param($Manifest,$CopySummary)
@@ -669,6 +730,7 @@ function Write-Report { param($Manifest,$CopySummary)
     $L += "Chrome CSV present: $($Manifest.ChromeCsv)"
     $L += "Wallpaper copied: $($Manifest.WallpaperCopied)"
     $L += "Outlook signatures: $($Manifest.SignaturesCopied)"
+    $L += "Desktop screenshots captured: $(($Manifest.DesktopScreenshots -and $Manifest.DesktopScreenshots.Count -gt 0))"
     $L += ""
     $L += "---- Network ----"
     foreach($n in $Manifest.Computer.NetworkAdapters){ $L += "Adapter: $($n.InterfaceAlias) IP: $($n.IPv4Address)/$($n.SubnetMask) GW: $($n.DefaultGateway) DNS: $($n.DnsServers) DHCP: $($n.DhcpEnabled) MAC: $($n.MacAddress)" }
@@ -698,6 +760,12 @@ function Write-Report { param($Manifest,$CopySummary)
     $L += "---- Deregistration Checklist ----"
     foreach($i in $Manifest.DeregChecklist){ $L += "[{0}] {1}  ({2})" -f ($(if($i.completed){'X'}else{' '})), $i.name, $i.notes }
     if($CopySummary){ $L += ""; $L += "---- Copy Summary ----"; $L += $CopySummary }
+
+    if ($Manifest.DesktopScreenshots -and $Manifest.DesktopScreenshots.Count -gt 0) {
+        $L += ""
+        $L += "---- Desktop Screenshots ----"
+        foreach ($shot in $Manifest.DesktopScreenshots) { $L += $shot }
+    }
 
     # Outlook setup credentials (do not display password in clear; only show email).
     if ($Manifest.PSObject.Properties['OutlookSetupAccount']) {
@@ -775,18 +843,45 @@ Set PDF and Browser now for the current user.",
 }
 function Apply-SystemDefaultAppsFromManifest { param($Manifest)
     try{
-        $tmpXml=Join-Path $SwapInfoRoot "DefaultApps_$TodayStamp.xml"
-        $xml=@"
-<?xml version="1.0" encoding="UTF-8"?>
-<DefaultAssociations>
-  <Association Identifier=".pdf" ProgId="$($Manifest.User.DefaultPdfProgId)" ApplicationName="PDF" />
-  <Association Identifier="http" ProgId="$($Manifest.User.DefaultBrowserProgId)" ApplicationName="Browser" />
-  <Association Identifier="https" ProgId="$($Manifest.User.DefaultBrowserProgId)" ApplicationName="Browser" />
-</DefaultAssociations>
-"@
-        Set-Content -Path $tmpXml -Value $xml -Encoding UTF8
+        if (-not $Manifest) {
+            Write-Log -Message 'Manifest not provided; cannot apply default apps.' -Level 'WARN'
+            return
+        }
+        $associations = @()
+        $pdfProgId = $null
+        $browserProgId = $null
+        if ($Manifest.User -and $Manifest.User.PSObject.Properties['DefaultPdfProgId']) {
+            $pdfProgId = $Manifest.User.DefaultPdfProgId
+        }
+        if ($Manifest.User -and $Manifest.User.PSObject.Properties['DefaultBrowserProgId']) {
+            $browserProgId = $Manifest.User.DefaultBrowserProgId
+        }
+        if (-not $pdfProgId -and -not $browserProgId) {
+            Write-Log -Message 'Manifest does not contain default app ProgIds to apply.' -Level 'WARN'
+            return
+        }
+        if ($pdfProgId) {
+            $associations += "  <Association Identifier=\".pdf\" ProgId=\"$pdfProgId\" ApplicationName=\"PDF\" />"
+        }
+        if ($browserProgId) {
+            $associations += "  <Association Identifier=\"http\" ProgId=\"$browserProgId\" ApplicationName=\"Browser\" />"
+            $associations += "  <Association Identifier=\"https\" ProgId=\"$browserProgId\" ApplicationName=\"Browser\" />"
+        }
+        $targetRoot = $SwapInfoRoot
+        if (-not $targetRoot) {
+            $targetRoot = $env:TEMP
+            Write-Log -Message 'SwapInfoRoot not set; using TEMP location for default app association XML.' -Level 'WARN'
+        }
+        $tmpXml=Join-Path $targetRoot "DefaultApps_$TodayStamp.xml"
+        $xml=@()
+        $xml += '<?xml version="1.0" encoding="UTF-8"?>'
+        $xml += '<DefaultAssociations>'
+        $xml += $associations
+        $xml += '</DefaultAssociations>'
+        Set-Content -Path $tmpXml -Value ($xml -join [Environment]::NewLine) -Encoding UTF8
         Write-Log -Message "Importing system default app associations via DISM."
-        Start-Process -FilePath dism.exe -ArgumentList "/Online","/Import-DefaultAppAssociations:$tmpXml" -Wait -NoNewWindow
+        Start-Process -FilePath dism.exe -ArgumentList "/Online","/Import-DefaultAppAssociations:$tmpXml" -Wait -NoNewWindow | Out-Null
+        Remove-Item -Path $tmpXml -Force -ErrorAction SilentlyContinue
     }catch{ Write-Log -Message "System default app import failed: $_" -Level 'WARN' }
 }
 
@@ -991,6 +1086,13 @@ $btnWallpaper = New-Object System.Windows.Forms.Button; $btnWallpaper.Text = "Co
 $btnSignatures = New-Object System.Windows.Forms.Button; $btnSignatures.Text = "Copy Outlook Signatures"; $btnSignatures.SetBounds(450,100,200,30); $btnSignatures.Add_Click({ Copy-OutlookSignatures | Out-Null })
 $btnDeregEdit = New-Object System.Windows.Forms.Button; $btnDeregEdit.Text = "Edit Deregistration List"; $btnDeregEdit.SetBounds(660,100,170,30); $btnDeregEdit.Add_Click({ $list=Ensure-DeregList; if(-not (Test-Path $DeregListPath)){ Save-Json -Object $list -Path $DeregListPath }; Start-Process notepad.exe $DeregListPath })
 $btnStartGather = New-Object System.Windows.Forms.Button; $btnStartGather.Text = "Start Gather"; $btnStartGather.SetBounds(10,140,150,32)
+$btnOpenRepo = New-Object System.Windows.Forms.Button; $btnOpenRepo.Text = "Open Repo Folder"; $btnOpenRepo.SetBounds(170,140,170,32); $btnOpenRepo.Add_Click({
+    if ($SwapInfoRoot -and (Test-Path $SwapInfoRoot)) {
+        Start-Process explorer.exe $SwapInfoRoot | Out-Null
+    } else {
+        [System.Windows.Forms.MessageBox]::Show('Repository folder not available yet. Start a gather to create it.','Repository Pending','OK','Warning') | Out-Null
+    }
+})
 $lblInfo = New-Object System.Windows.Forms.Label; $lblInfo.Text = "All collected files + manifest/report/logs are written to: $SwapInfoRoot"; $lblInfo.SetBounds(10,175,820,20)
 $lvGather = New-Object System.Windows.Forms.TextBox; $lvGather.Multiline = $true; $lvGather.ReadOnly = $true; $lvGather.ScrollBars = 'Vertical'; $lvGather.SetBounds(10,205,820,300)
 Add-LogSubscriber { param($line) $lvGather.AppendText($line + [Environment]::NewLine) }
@@ -1006,6 +1108,7 @@ $tabGather.Controls.AddRange(@(
     $btnSignatures,
     $btnDeregEdit,
     $btnStartGather,
+    $btnOpenRepo,
     $lblInfo,
     $lvGather
 ))
@@ -1042,6 +1145,9 @@ $btnStartGather.Add_Click({
     $repoRoot = Join-Path $repoBase 'PC_SWAP_INFO'
     # Use the correct parameter name (-RepoRoot) to set the repository root once the technician has selected a destination
     Set-SwapInfoRoot -RepoRoot $repoRoot
+    if ($lblInfo) {
+        $lblInfo.Text = "All collected files + manifest/report/logs are written to: $SwapInfoRoot"
+    }
 
     # 3) Collect info now that $SwapInfoRoot exists
     $gen = Get-GeneralInfo
@@ -1107,13 +1213,44 @@ $tbOU = New-Object System.Windows.Forms.TextBox; $tbOU.SetBounds(320,95,300,25)
 $btnStartRestore = New-Object System.Windows.Forms.Button; $btnStartRestore.Text = "Start Restore"; $btnStartRestore.SetBounds(10,130,150,32)
 $btnDefaults = New-Object System.Windows.Forms.Button; $btnDefaults.Text = "Open Default Apps Guidance"; $btnDefaults.SetBounds(170,130,220,32); $btnDefaults.Add_Click({ Open-DefaultAppsGuidance })
 $btnApplySysDefaults = New-Object System.Windows.Forms.Button; $btnApplySysDefaults.Text = "Apply System Default Apps (DISM)"; $btnApplySysDefaults.SetBounds(400,130,240,32); $btnApplySysDefaults.Add_Click({ $m=$null; if(Test-Path $tbMan.Text){ $m=Load-Json -Path $tbMan.Text }; if($m){ Apply-SystemDefaultAppsFromManifest -Manifest $m } })
+$btnOpenManifestFolder = New-Object System.Windows.Forms.Button; $btnOpenManifestFolder.Text = "Open Manifest Folder"; $btnOpenManifestFolder.SetBounds(650,130,180,32); $btnOpenManifestFolder.Add_Click({
+    if (Test-Path $tbMan.Text) {
+        $folder = Split-Path -Parent $tbMan.Text
+        if ($folder -and (Test-Path $folder)) {
+            Start-Process explorer.exe $folder | Out-Null
+        }
+    } else {
+        [System.Windows.Forms.MessageBox]::Show('Select a manifest before opening its folder.','Manifest Required','OK','Warning') | Out-Null
+    }
+})
 # Profile source root picker
 $lblSrc = New-Object System.Windows.Forms.Label; $lblSrc.Text = "Profile source ROOT (contains OLDHOST_DD-MM-YYYY folder):"; $lblSrc.SetBounds(10,170,480,20)
 $tbSrcRoot = New-Object System.Windows.Forms.TextBox; $tbSrcRoot.SetBounds(10,195,650,25)
 $btnBrowseSrc = New-Object System.Windows.Forms.Button; $btnBrowseSrc.Text = "Browse..."; $btnBrowseSrc.SetBounds(670,194,80,27); $btnBrowseSrc.Add_Click({ $sel=Select-FolderDialog; if($sel){ $tbSrcRoot.Text=$sel } })
 $lvRestore = New-Object System.Windows.Forms.TextBox; $lvRestore.Multiline = $true; $lvRestore.ReadOnly = $true; $lvRestore.ScrollBars = 'Vertical'; $lvRestore.SetBounds(10,230,820,275)
 Add-LogSubscriber { param($line) $lvRestore.AppendText($line + [Environment]::NewLine) }
-$tabRestore.Controls.AddRange(@($lblMan,$tbMan,$btnBrowseMan,$lblDom,$tbDomain,$lblOU,$tbOU,$btnStartRestore,$btnDefaults,$btnApplySysDefaults,$lblSrc,$tbSrcRoot,$btnBrowseSrc,$lvRestore))
+$tabRestore.Controls.AddRange(@($lblMan,$tbMan,$btnBrowseMan,$lblDom,$tbDomain,$lblOU,$tbOU,$btnStartRestore,$btnDefaults,$btnApplySysDefaults,$btnOpenManifestFolder,$lblSrc,$tbSrcRoot,$btnBrowseSrc,$lvRestore))
+
+$tbMan.Add_TextChanged({
+    $path = $tbMan.Text
+    if (Test-Path $path) {
+        try {
+            $repoDir = Split-Path -Parent $path
+            if ($repoDir) {
+                Set-SwapInfoRoot -RepoRoot $repoDir
+            }
+            $hostRoot = $null
+            if ($repoDir) {
+                $hostRoot = Split-Path -Parent $repoDir
+            }
+            if ($hostRoot -and (Test-Path $hostRoot)) {
+                $tbSrcRoot.Text = $hostRoot
+            }
+        } catch {
+            Write-Log -Message "Failed to process manifest selection: $_" -Level 'WARN'
+        }
+    }
+})
 
 # Restore click
 $btnStartRestore.Add_Click({

@@ -805,6 +805,17 @@ If Chrome is not installed or has no saved passwords, note that outcome in the t
     Write-Log -Message 'Displayed manual Chrome password export instructions.'
     [System.Windows.Forms.MessageBox]::Show($instructions, 'Chrome Password Export', 'OK', 'Information') | Out-Null
 
+    if ($repoRoot) {
+        $chromeCsvPath = Join-Path $repoRoot $ChromeCsvName
+        if (Test-Path $chromeCsvPath) {
+            Write-Log -Message "Validated presence of manual Chrome password export: $chromeCsvPath" -Level 'INFO'
+        } else {
+            Write-Log -Message "Chrome password CSV not found at expected path after technician acknowledged instructions: $chromeCsvPath" -Level 'WARN'
+        }
+    } else {
+        Write-Log -Message 'Skipping Chrome password CSV validation because SwapInfoRoot is not set.' -Level 'WARN'
+    }
+
     return $true
 }
 

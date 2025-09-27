@@ -175,6 +175,14 @@ $DeregListPath = $null
 $ChromeCsvName  = 'Chrome Passwords.csv'
 $WallpaperName  = 'TranscodedWallpaper'
 
+# Ensure the repository-scoped globals are also available in the global scope so
+# that event handlers executed outside the original script scope can see them
+# when the script is invoked from an in-memory script block (e.g. irm | iex).
+$global:SwapInfoRoot = $SwapInfoRoot
+$global:StatePath = $StatePath
+$global:DeregListPath = $DeregListPath
+$global:LogPath = $LogPath
+
 # If a manifest path is supplied on the command line, it will be captured here and used
 # during resume phases instead of reading state.json.  This allows the restore flow
 # to run directly against a specific manifest without relying on the interim state file.
@@ -230,6 +238,14 @@ function Set-SwapInfoRoot {
     $script:StatePath     = Join-Path $script:SwapInfoRoot 'state.json'
     $script:DeregListPath = Join-Path $script:SwapInfoRoot 'deregistration-checklist.json'
     $script:LogPath       = Join-Path $script:SwapInfoRoot ("pcswap_{0}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+
+    # Mirror repository paths into the global scope so that event handlers raised
+    # after the initial script invocation (for example when the script is invoked
+    # from an in-memory script block) continue to resolve these variables.
+    $global:SwapInfoRoot  = $script:SwapInfoRoot
+    $global:StatePath     = $script:StatePath
+    $global:DeregListPath = $script:DeregListPath
+    $global:LogPath       = $script:LogPath
     try { Write-Log -Message "SwapInfoRoot set: $script:SwapInfoRoot" } catch {}
 }
 

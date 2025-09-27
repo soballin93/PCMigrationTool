@@ -2,7 +2,7 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.26 (2025-09-27)
+    Version: 0.5.27 (2025-09-28)
 
 
 
@@ -12,6 +12,11 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.27
+      - Improvement: Launch Chrome automatically to chrome://settings/passwords when guiding
+        technicians through the manual password export.
+      - Date: 2025-09-28
+
     0.5.26
       - Change: Removed automated Chrome password export and restored technician-guided instructions.
       - Date: 2025-09-27
@@ -175,7 +180,7 @@
       - PowerShell 5.1, run as admin.
     Limitations (intentional):
       - Default apps cannot be set silently per-user; we record ProgIDs and open Settings.
-      - Chrome password export must be performed manually via the Chrome UI.
+      - Chrome password export remains manual; the tool opens chrome://settings/passwords automatically.
 
 #>
 
@@ -196,7 +201,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.26'
+$ProgramVersion = '0.5.27'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -582,6 +587,44 @@ function Select-FileDialog { param([string]$Filter="All files (*.*)|*.*",[string
 function Copy-Safe { param([string]$Source,[string]$Dest)
     try{ if(Test-Path $Source){ New-Item -ItemType Directory -Path (Split-Path $Dest) -Force | Out-Null; Copy-Item $Source $Dest -Force -ErrorAction Stop; Write-Log -Message "Copied $(Split-Path -Leaf $Source) -> $Dest"; return $true } else { Write-Log -Message "Missing: $Source" -Level 'WARN' } }catch{ Write-Log -Message "Copy failed $Source -> $Dest : $_" -Level 'ERROR' } ; return $false
 }
+
+function Get-ChromeExecutablePath {
+    [CmdletBinding()]
+    param()
+
+    $candidates = @()
+    if ($env:ProgramFiles) { $candidates += Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe' }
+    $programFilesX86 = ${env:ProgramFiles(x86)}
+    if ($programFilesX86) { $candidates += Join-Path $programFilesX86 'Google\Chrome\Application\chrome.exe' }
+    if ($env:LOCALAPPDATA) { $candidates += Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe' }
+
+    foreach ($candidate in $candidates) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+
+    $regRoots = @(
+        'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe',
+        'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe'
+    )
+
+    foreach ($regRoot in $regRoots) {
+        try {
+            $value = [Microsoft.Win32.Registry]::GetValue($regRoot, '', $null)
+            if ($value -is [string]) {
+                $resolved = $value.Trim('"')
+                if (-not [string]::IsNullOrWhiteSpace($resolved) -and (Test-Path $resolved)) {
+                    return $resolved
+                }
+            }
+        } catch {
+            Write-Log -Message "Failed to read Chrome path from ${regRoot}: $($_)" -Level 'WARN'
+        }
+    }
+
+    return $null
+}
 function Test-IsDomainJoined { try{ $cs=Get-WmiObject -Class Win32_ComputerSystem -ErrorAction Stop; [bool]$cs.PartOfDomain }catch{ $false } }
 
 # -------------- Data Collection ---------------
@@ -711,11 +754,46 @@ function Show-ChromePasswordExportGuide {
 
     $targetPath = if ($repoRoot) { Join-Path $repoRoot $ChromeCsvName } else { $ChromeCsvName }
 
+    $launchUrl = 'chrome://settings/passwords'
+    $chromePath = $null
+    $chromeLaunched = $false
+
+    try {
+        $chromePath = Get-ChromeExecutablePath
+    } catch {
+        Write-Log -Message "Failed to resolve Chrome executable path: $($_)" -Level 'WARN'
+    }
+
+    if ($chromePath) {
+        try {
+            Start-Process -FilePath $chromePath -ArgumentList $launchUrl -ErrorAction Stop | Out-Null
+            Write-Log -Message "Launched Chrome at $launchUrl using resolved path: $chromePath"
+            $chromeLaunched = $true
+        } catch {
+            Write-Log -Message "Failed to launch Chrome using resolved path ${chromePath}: $($_)" -Level 'WARN'
+        }
+    }
+
+    if (-not $chromeLaunched) {
+        try {
+            if (-not $chromePath) {
+                Write-Log -Message 'Chrome executable path not resolved; attempting PATH-based launch for chrome://settings/passwords.'
+            } else {
+                Write-Log -Message 'Attempting PATH-based Chrome launch for chrome://settings/passwords after resolved-path failure.'
+            }
+            Start-Process -FilePath 'chrome.exe' -ArgumentList $launchUrl -ErrorAction Stop | Out-Null
+            Write-Log -Message 'Launched Chrome at chrome://settings/passwords via PATH fallback.'
+            $chromeLaunched = $true
+        } catch {
+            Write-Log -Message "Unable to launch Chrome automatically for password export: $($_)" -Level 'WARN'
+        }
+    }
+
     $instructions = @"
 Chrome passwords must be exported manually by the technician.
 
 1. Sign in to the user's Chrome profile on this machine.
-2. Open Google Chrome and browse to chrome://settings/passwords.
+2. Chrome should open automatically to chrome://settings/passwords. If it does not, open Google Chrome and browse to that address.
 3. In ""Saved Passwords"", open the three-dot menu and choose ""Export passwords"".
 4. Approve the Windows security prompt when asked to confirm the export.
 5. Save the CSV as ""$ChromeCsvName"" in the repository folder shown below:

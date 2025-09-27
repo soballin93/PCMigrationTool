@@ -299,14 +299,18 @@ function Get-MappedDrives {
     try {
         $ws = New-Object -ComObject WScript.Network
         $col = $ws.EnumNetworkDrives()
-        for ($i = 0; $i -lt $col.Count; $i += 2) {
-            $drv  = $col.Item($i)
-            $path = $col.Item($i + 1)
-            if (-not [string]::IsNullOrWhiteSpace($drv)) {
-                $drives += [PSCustomObject]@{
-                    DeviceID     = $drv
-                    ProviderName = $path
-                    VolumeName   = $null
+        if ($null -ne $col) {
+            $countMethod = $col.PSObject.Methods['Count']
+            $count = if ($countMethod) { [int]$col.Count() } else { 0 }
+            for ($i = 0; $i -lt $count; $i += 2) {
+                $drv  = $col.Item($i)
+                $path = $col.Item($i + 1)
+                if (-not [string]::IsNullOrWhiteSpace($drv)) {
+                    $drives += [PSCustomObject]@{
+                        DeviceID     = $drv
+                        ProviderName = $path
+                        VolumeName   = $null
+                    }
                 }
             }
         }

@@ -2,7 +2,7 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.30 (2025-10-01)
+    Version: 0.5.31 (2025-10-02)
 
 
 
@@ -13,6 +13,10 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.31
+      - Fix: Initialize resume flows with the manifest override before attempting to read
+        state.json so SwapInfoRoot is populated for scheduled resume tasks.
+      - Date: 2025-10-02
     0.5.30
       - Fix: Prevent resume logging from triggering invalid variable reference errors
         when the script runs from an in-memory invocation.
@@ -216,7 +220,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.30'
+$ProgramVersion = '0.5.31'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -1744,24 +1748,33 @@ $btnStartRestore.Add_Click({
 # ----------------- Resume Paths ------------------
 if ($Resume) {
     Write-Log -Message "=== RESUME START ==="
-    # Attempt to load the saved state from state.json.  The state stores the manifest path
-    # but if a manifest was supplied on the command line we will honor that instead.
-    $statePath = Get-StatePath
     $state = $null
+    $statePath = $null
+    $manifestPath = $null
+
+    if ($ManifestOverride) {
+        $manifestPath = $ManifestOverride
+        try {
+            $repoDir = Split-Path -Parent $manifestPath
+            if ($repoDir) { Set-SwapInfoRoot -RepoRoot $repoDir }
+        } catch {}
+    }
+
+    $statePath = Get-StatePath
     if ($statePath) {
         $state = Load-Json -Path $statePath
+        if (-not $state) {
+            Write-Log -Message ("State.json unavailable for resume (expected at {0})." -f $statePath) -Level 'ERROR'
+        }
     } else {
         Write-Log -Message 'State path unavailable during resume.' -Level 'ERROR'
     }
-    $manifestPath = $null
-    if ($ManifestOverride) {
-        $manifestPath = $ManifestOverride
-    } elseif ($state) {
+
+    if (-not $manifestPath -and $state) {
         $manifestPath = $state.ManifestPath
     }
+
     if ($manifestPath) {
-        # Set the repository root based on the manifest path so that subsequent operations
-        # (like reading state.json or writing logs) go to the correct location.
         try {
             $repoDir = Split-Path -Parent $manifestPath
             if ($repoDir) { Set-SwapInfoRoot -RepoRoot $repoDir }
@@ -1769,7 +1782,6 @@ if ($Resume) {
         $manifest = Load-Json -Path $manifestPath
         if ($manifest) {
             Restore-Network -Manifest $manifest
-            # Import Wi‑Fi profiles if folder exists
             try {
                 $repoRoot = Get-SwapInfoRoot
                 if ($repoRoot) {
@@ -1781,7 +1793,6 @@ if ($Resume) {
             } catch { Write-Log -Message "Wireless profile import error (resume): $($_)" -Level 'WARN' }
             Restore-WallpaperAndSignatures
             Open-DefaultAppsGuidance
-            # Do not display Outlook credentials in system context; this will be handled in user resume
             Write-Log -Message "Post-join steps executed."
         } else {
             Write-Log -Message "Manifest missing on resume (path: $manifestPath)." -Level 'ERROR'
@@ -1794,27 +1805,39 @@ if ($Resume) {
 
 if ($ResumeUser) {
     Write-Log -Message "=== USER RESUME START ==="
-    $statePath = Get-StatePath
     $state = $null
+    $statePath = $null
+    $manifestPath = $null
+
+    if ($ManifestOverride) {
+        $manifestPath = $ManifestOverride
+        try {
+            $repoDir = Split-Path -Parent $manifestPath
+            if ($repoDir) { Set-SwapInfoRoot -RepoRoot $repoDir }
+        } catch {}
+    }
+
+    $statePath = Get-StatePath
     if ($statePath) {
         $state = Load-Json -Path $statePath
+        if (-not $state) {
+            Write-Log -Message ("No state.json available for user resume (expected at {0})." -f $statePath) -Level 'ERROR'
+        }
     } else {
         Write-Log -Message 'State path unavailable during user resume.' -Level 'ERROR'
     }
-    # Determine manifest path: honor -Manifest argument if supplied; otherwise use state.json
-    $manifestPath = $null
-    if ($ManifestOverride) {
-        $manifestPath = $ManifestOverride
-    } elseif ($state) {
+
+    if (-not $manifestPath -and $state) {
         $manifestPath = $state.ManifestPath
     }
-    # Set repository root based on manifest path so that $SwapInfoRoot and related paths are valid
+
     if ($manifestPath) {
         try {
             $repoDir = Split-Path -Parent $manifestPath
             if ($repoDir) { Set-SwapInfoRoot -RepoRoot $repoDir }
         } catch {}
     }
+
     if ($state) {
         $targetUser = $env:USERNAME
         $src = $state.ProfileSource
@@ -1824,7 +1847,6 @@ if ($ResumeUser) {
             Write-Log -Message $summary
             Restore-WallpaperAndSignatures
             Open-DefaultAppsGuidance
-            # Load the manifest for Outlook credentials (prefer manifest override)
             $manifest = $null
             if ($manifestPath) {
                 try { $manifest = Load-Json -Path $manifestPath } catch {}
@@ -1839,9 +1861,8 @@ if ($ResumeUser) {
         } else {
             Write-Log -Message "No profile source defined; skipping file restore." -Level 'WARN'
         }
-    } else {
-        Write-Log -Message "No state.json for user resume." -Level 'ERROR'
     }
+
     Write-Log -Message "=== USER RESUME END ==="
     exit 0
 }

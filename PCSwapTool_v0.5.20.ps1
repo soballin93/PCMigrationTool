@@ -6,6 +6,7 @@
 
 
 
+
 .DESCRIPTION
     A WinForms GUI PowerShell tool to gather migration data from a Windows 10/11 machine,
     produce a technician report and a machine-readable manifest, and restore/apply that data
@@ -16,7 +17,6 @@
       - Fix: Prevent resume logging from triggering invalid variable reference errors
         when the script runs from an in-memory invocation.
       - Date: 2025-10-01
-
     0.5.29
       - Fix: Persist the script to a local cache when invoked from memory so
         restore resume tasks have a valid file path when scheduled.

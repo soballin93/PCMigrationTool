@@ -1537,9 +1537,11 @@ function Register-UserResumeTaskEx {
     )
     try {
         $taskName = 'PCSwap-Resume-User'
-        # Base args always include -ResumeUser
-        $args = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -ResumeUser"
-        if ($ManifestPath) { $args += " -Manifest `"$ManifestPath`"" }
+        # Build the argument list as an array to avoid quoting issues
+        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ScriptPath`"", '-ResumeUser')
+        if ($ManifestPath) { $argList += @('-Manifest', "`"$ManifestPath`"") }
+        $args    = $argList -join ' '
+
         $action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $args
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $UserName
         $principal = New-ScheduledTaskPrincipal -UserId $UserName -RunLevel Limited -LogonType Interactive
@@ -1561,8 +1563,9 @@ function Copy-ProfileToUser { param([string]$SourceFolder,[string]$TargetUserNam
     $args=@($SourceFolder,$targetProfile,"/E","/R:1","/W:1","/XJ") + $copyFlags + $xdArgs
     Write-Log -Message "Restoring files: $SourceFolder -> $targetProfile Flags=$($copyFlags -join ' ')"
     $proc=Start-Process -FilePath robocopy.exe -ArgumentList $args -Wait -PassThru -NoNewWindow
-    $code=$proc.ExitCode; Write-Log -Message "Robocopy restore exit code: $code"
-    "Robocopy restore exit code: $code (0/1=OK)."
+    $code=$proc.ExitCode
+    Write-Log -Message "Robocopy restore exit code: $code"
+    return "Robocopy restore exit code: $code (0/1=OK)."
 }
 
 # ------------------- GUI -----------------------

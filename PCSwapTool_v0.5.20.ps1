@@ -2,7 +2,7 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.27 (2025-09-28)
+    Version: 0.5.28 (2025-09-29)
 
 
 
@@ -12,6 +12,11 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.28
+      - Fix: Preserve the script path when registering resume actions so restore
+        tasks schedule correctly even when $PSCommandPath is blank.
+      - Date: 2025-09-29
+
     0.5.27
       - Improvement: Launch Chrome automatically to chrome://settings/passwords when guiding
         technicians through the manual password export.
@@ -201,7 +206,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.27'
+$ProgramVersion = '0.5.28'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -226,6 +231,22 @@ $script:ToolRoot = try {
     (Get-Location).Path
 }
 
+# Capture the path to the script itself so resume scheduling can reference it even if
+# $PSCommandPath is unavailable (for example, when the script is dot-sourced or invoked
+# from memory).  Persist in both script and global scope so event handlers share it.
+$script:ScriptInvocationPath = try {
+    $cmdPath = $MyInvocation.MyCommand.Path
+    if (-not [string]::IsNullOrWhiteSpace($cmdPath)) {
+        $cmdPath
+    } elseif (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) {
+        $PSCommandPath
+    } else {
+        $null
+    }
+} catch {
+    $null
+}
+
 # Ensure the repository-scoped globals are also available in the global scope so
 # that event handlers executed outside the original script scope can see them
 # when the script is invoked from an in-memory script block (e.g. irm | iex).
@@ -233,6 +254,7 @@ $global:SwapInfoRoot = $SwapInfoRoot
 $global:StatePath = $StatePath
 $global:DeregListPath = $DeregListPath
 $global:LogPath = $LogPath
+$global:ScriptInvocationPath = $script:ScriptInvocationPath
 
 # If a manifest path is supplied on the command line, it will be captured here and used
 # during resume phases instead of reading state.json.  This allows the restore flow
@@ -1593,8 +1615,13 @@ $btnStartRestore.Add_Click({
     }
     # Include manifest path when scheduling resume tasks so the resume phases can load
     # the correct manifest without relying on state.json alone.
-    New-RunOnceResume -ScriptPath $PSCommandPath -ManifestPath $tbMan.Text
-    if ($createdLocalUser) { Register-UserResumeTaskEx -UserName $targetLocalUser -ScriptPath $PSCommandPath -ManifestPath $tbMan.Text | Out-Null }
+    $resumeScriptPath = if (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) { $PSCommandPath } else { $global:ScriptInvocationPath }
+    if (-not [string]::IsNullOrWhiteSpace($resumeScriptPath)) {
+        New-RunOnceResume -ScriptPath $resumeScriptPath -ManifestPath $tbMan.Text
+        if ($createdLocalUser) { Register-UserResumeTaskEx -UserName $targetLocalUser -ScriptPath $resumeScriptPath -ManifestPath $tbMan.Text | Out-Null }
+    } else {
+        Write-Log -Message 'Unable to resolve script path for resume registration.' -Level 'ERROR'
+    }
 
     if ($domain -or $newName) {
         [System.Windows.Forms.MessageBox]::Show("System needs to reboot to continue restore. After reboot, log into the intended user to complete file restore.","Reboot Required",'OK','Information') | Out-Null

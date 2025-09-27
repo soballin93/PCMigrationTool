@@ -861,11 +861,11 @@ function Apply-SystemDefaultAppsFromManifest { param($Manifest)
             return
         }
         if ($pdfProgId) {
-            $associations += "  <Association Identifier=\".pdf\" ProgId=\"$pdfProgId\" ApplicationName=\"PDF\" />"
+            $associations += "  <Association Identifier=`".pdf`" ProgId=`"$pdfProgId`" ApplicationName=`"PDF`" />"
         }
         if ($browserProgId) {
-            $associations += "  <Association Identifier=\"http\" ProgId=\"$browserProgId\" ApplicationName=\"Browser\" />"
-            $associations += "  <Association Identifier=\"https\" ProgId=\"$browserProgId\" ApplicationName=\"Browser\" />"
+            $associations += "  <Association Identifier=`"http`" ProgId=`"$browserProgId`" ApplicationName=`"Browser`" />"
+            $associations += "  <Association Identifier=`"https`" ProgId=`"$browserProgId`" ApplicationName=`"Browser`" />"
         }
         $targetRoot = $SwapInfoRoot
         if (-not $targetRoot) {

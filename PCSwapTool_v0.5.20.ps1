@@ -2,7 +2,7 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.20 (2025-08-24)
+    Version: 0.5.21 (2025-09-27)
 
 .DESCRIPTION
     A WinForms GUI PowerShell tool to gather migration data from a Windows 10/11 machine,
@@ -10,6 +10,11 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.21
+      - Fix: Initialize the ProtectedDataReady flag before first use so Chrome password
+        export no longer fails under StrictMode when the ProtectedData type is loaded
+        on demand.
+      - Date: 2025-09-27
     0.5.10
       - Feature: Read default PDF and browser ProgIds from the new UserChoiceLatest registry keys when available (for ".pdf" and HTTP associations) and fall back to legacy UserChoice keys. This prevents defaults from appearing as MS Edge when Chrome/Adobe are set.
       - Bumped version and changelog accordingly.
@@ -163,7 +168,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.20'
+$ProgramVersion = '0.5.21'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -201,6 +206,7 @@ $script:ResourceDownloadBaseUrl = if ([string]::IsNullOrWhiteSpace($env:PCSwapTo
 
 $script:SqliteAssemblyLoaded   = $false
 $script:BouncyCastleLoaded     = $false
+$script:ProtectedDataReady     = $false
 
 # Ensure the repository-scoped globals are also available in the global scope so
 # that event handlers executed outside the original script scope can see them

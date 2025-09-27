@@ -2,7 +2,7 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.33 (2025-10-04)
+    Version: 0.5.34 (2025-10-05)
 
 
 
@@ -13,6 +13,11 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.34
+      - Restore: Remove the PCSwap-Resume-User scheduled task after the
+        user-context resume completes so it does not linger once restore
+        finishes.
+      - Date: 2025-10-05
     0.5.33
       - Restore: Replace the automatic reboot with a technician prompt that reboots the
         workstation when they confirm, keeping the workflow in sync with hostname/domain
@@ -232,7 +237,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.33'
+$ProgramVersion = '0.5.34'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -1472,6 +1477,31 @@ function Register-UserResumeTaskEx {
         return $false
     }
 }
+function Remove-UserResumeTask {
+    [CmdletBinding()]
+    param()
+
+    $taskName = 'PCSwap-Resume-User'
+    try {
+        $null = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    } catch {
+        $err = $_
+        $noMatchId = 'NoMatchingTasksFound,Microsoft.Windows.ScheduledTasks.Commands.GetScheduledTaskCommand'
+        if ($err.FullyQualifiedErrorId -eq $noMatchId) {
+            Write-Log -Message "User resume task $taskName not present; nothing to remove."
+        } else {
+            Write-Log -Message ("Failed to query user resume task {0}: {1}" -f $taskName, $err) -Level 'WARN'
+        }
+        return
+    }
+
+    try {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop | Out-Null
+        Write-Log -Message "Removed user-context resume task ($taskName) after restore completion."
+    } catch {
+        Write-Log -Message ("Failed to remove user resume task {0}: {1}" -f $taskName, $_) -Level 'WARN'
+    }
+}
 function Copy-ProfileToUser { param([string]$SourceFolder,[string]$TargetUserName,[bool]$IncludeOneDrive)
     if(-not (Test-Path $SourceFolder)){ Write-Log -Message "Source folder missing: $SourceFolder" -Level 'ERROR'; return "Source not found: $SourceFolder" }
     $targetProfile=Join-Path 'C:\Users' $TargetUserName
@@ -1944,6 +1974,12 @@ if ($ResumeUser) {
         } else {
             Write-Log -Message "No profile source defined; skipping file restore." -Level 'WARN'
         }
+    }
+
+    try {
+        Remove-UserResumeTask
+    } catch {
+        Write-Log -Message ("Remove-UserResumeTask failed: {0}" -f $_) -Level 'WARN'
     }
 
     Write-Log -Message "=== USER RESUME END ==="

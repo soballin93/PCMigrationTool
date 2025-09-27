@@ -792,14 +792,11 @@ function Show-ChromePasswordExportGuide {
     $instructions = @"
 Chrome passwords must be exported manually by the technician.
 
-1. Sign in to the user's Chrome profile on this machine.
-2. Chrome should open automatically to chrome://settings/passwords. If it does not, open Google Chrome and browse to that address.
-3. In ""Saved Passwords"", open the three-dot menu and choose ""Export passwords"".
-4. Approve the Windows security prompt when asked to confirm the export.
-5. Save the CSV as ""$ChromeCsvName"" in the repository folder shown below:
+1. Chrome should open automatically to chrome://settings/passwords. If it does not, open Google Chrome and browse to that address.
+2. In ""Saved Passwords"", open the three-dot menu and choose ""Export passwords"".
+3. Approve the Windows security prompt when asked to confirm the export.
+4. Save the CSV as ""$ChromeCsvName"" in the repository folder shown below:
    $targetPath
-
-If Chrome is not installed or has no saved passwords, note that outcome in the technician report.
 "@
 
     Write-Log -Message 'Displayed manual Chrome password export instructions.'

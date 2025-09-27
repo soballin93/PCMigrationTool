@@ -2,7 +2,7 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.25 (2025-09-27)
+    Version: 0.5.26 (2025-09-27)
 
 
 
@@ -12,6 +12,10 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.26
+      - Change: Removed automated Chrome password export and restored technician-guided instructions.
+      - Date: 2025-09-27
+
     0.5.25
       - Fix: Fall back to DPAPI when Chrome AES-GCM secrets fail authentication
         so legacy DPAPI entries with "vXX" prefixes still decrypt correctly.
@@ -171,7 +175,7 @@
       - PowerShell 5.1, run as admin.
     Limitations (intentional):
       - Default apps cannot be set silently per-user; we record ProgIDs and open Settings.
-      - Chrome password export guided via Chrome UI (Windows auth prompt appears).
+      - Chrome password export must be performed manually via the Chrome UI.
 
 #>
 
@@ -192,7 +196,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.25'
+$ProgramVersion = '0.5.26'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -216,21 +220,6 @@ $script:ToolRoot = try {
 } catch {
     (Get-Location).Path
 }
-
-$script:DependencyCacheRoot = try {
-    Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath 'PCSwapTool'
-} catch {
-    Join-Path -Path $env:TEMP -ChildPath 'PCSwapTool'
-}
-$script:ResourceDownloadBaseUrl = if ([string]::IsNullOrWhiteSpace($env:PCSwapToolResourceBaseUrl)) {
-    'https://raw.githubusercontent.com/soballin93/PCMigrationTool/main/'
-} else {
-    $env:PCSwapToolResourceBaseUrl
-}
-
-$script:SqliteAssemblyLoaded   = $false
-$script:BouncyCastleLoaded     = $false
-$script:ProtectedDataReady     = $false
 
 # Ensure the repository-scoped globals are also available in the global scope so
 # that event handlers executed outside the original script scope can see them
@@ -709,448 +698,37 @@ function Get-UserInfoPack {
     }
 }
 
-# -------------- Chrome Password Export (automated) --------------
+# -------------- Chrome Password Guidance --------------
 
-function Invoke-DownloadToolResource {
+function Show-ChromePasswordExportGuide {
     [CmdletBinding()]
-    param([Parameter(Mandatory=$true)][string]$FileName)
-
-    if ([string]::IsNullOrWhiteSpace($FileName)) { return $null }
-
-    $baseUrl = $script:ResourceDownloadBaseUrl
-    if ([string]::IsNullOrWhiteSpace($baseUrl)) { return $null }
-
-    $cacheRoot = $script:DependencyCacheRoot
-    if ([string]::IsNullOrWhiteSpace($cacheRoot)) { return $null }
-
-    try {
-        if (-not (Test-Path $cacheRoot)) {
-            New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
-        }
-    } catch {
-        Write-Log -Message ("Failed to prepare dependency cache at {0}: {1}" -f $cacheRoot, $_) -Level 'WARN'
-        return $null
-    }
-
-    $normalizedBase = if ($baseUrl.Trim().EndsWith('/')) { $baseUrl.Trim() } else { $baseUrl.Trim() + '/' }
-    $uri = $normalizedBase + $FileName
-    $targetPath = Join-Path -Path $cacheRoot -ChildPath $FileName
-
-    try {
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
-    } catch {}
-
-    try {
-        Invoke-WebRequest -Uri $uri -OutFile $targetPath -UseBasicParsing -ErrorAction Stop | Out-Null
-        Write-Log -Message "Downloaded $FileName from $uri to $targetPath"
-        return $targetPath
-    } catch {
-        Write-Log -Message ("Failed to download {0} from {1}: {2}" -f $FileName, $uri, $_) -Level 'WARN'
-        return $null
-    }
-}
-
-
-function Get-ToolResourcePath {
-    [CmdletBinding()]
-    param([Parameter(Mandatory=$true)][string]$FileName)
-
-    $candidates = @()
-    if ($script:ToolRoot -and (Test-Path $script:ToolRoot)) {
-        $candidates += (Join-Path $script:ToolRoot $FileName)
-    }
-    $currentPath = (Get-Location).Path
-    if ($currentPath) {
-        $candidates += (Join-Path $currentPath $FileName)
-    }
-    if ($script:DependencyCacheRoot) {
-        $candidates += (Join-Path -Path $script:DependencyCacheRoot -ChildPath $FileName)
-    }
-
-
-    foreach ($candidate in $candidates | Select-Object -Unique) {
-        try {
-            if (Test-Path $candidate) {
-                return (Resolve-Path -Path $candidate -ErrorAction Stop).Path
-            }
-        } catch {}
-    }
-
-    $downloadedPath = Invoke-DownloadToolResource -FileName $FileName
-    if ($downloadedPath -and (Test-Path $downloadedPath)) {
-        try {
-            return (Resolve-Path -Path $downloadedPath -ErrorAction Stop).Path
-        } catch {
-            return $downloadedPath
-        }
-    }
-
-
-    return $null
-}
-
-function Ensure-SqliteAssembly {
-    if ($script:SqliteAssemblyLoaded) { return $true }
-
-    $dllPath = Get-ToolResourcePath -FileName 'System.Data.SQLite.dll'
-    if (-not $dllPath) {
-        Write-Log -Message 'System.Data.SQLite.dll not found; Chrome password export is unavailable.' -Level 'ERROR'
-        return $false
-    }
-
-    try {
-        [void][System.Reflection.Assembly]::LoadFrom($dllPath)
-        $script:SqliteAssemblyLoaded = $true
-        Write-Log -Message "Loaded System.Data.SQLite from $dllPath"
-        return $true
-    } catch {
-        Write-Log -Message ("Failed to load System.Data.SQLite.dll: {0}" -f $_) -Level 'ERROR'
-        return $false
-    }
-}
-
-function Ensure-BouncyCastleAssembly {
-    if ($script:BouncyCastleLoaded) { return $true }
-
-    $dllPath = Get-ToolResourcePath -FileName 'BouncyCastle.Crypto.dll'
-    if (-not $dllPath) {
-        Write-Log -Message 'BouncyCastle.Crypto.dll not found; Chrome password decryption is unavailable.' -Level 'ERROR'
-        return $false
-    }
-
-    try {
-        [void][System.Reflection.Assembly]::LoadFrom($dllPath)
-        $script:BouncyCastleLoaded = $true
-        Write-Log -Message "Loaded BouncyCastle.Crypto from $dllPath"
-        return $true
-    } catch {
-        Write-Log -Message ("Failed to load BouncyCastle.Crypto.dll: {0}" -f $_) -Level 'ERROR'
-        return $false
-    }
-}
-
-function Get-ProtectedDataType {
-    foreach ($asm in [AppDomain]::CurrentDomain.GetAssemblies()) {
-        $type = $asm.GetType('System.Security.Cryptography.ProtectedData', $false)
-        if ($type) { return $type }
-    }
-    return $null
-}
-
-function Ensure-ProtectedDataSupport {
-    if ($script:ProtectedDataReady) { return $true }
-
-    if (Get-ProtectedDataType) {
-        $script:ProtectedDataReady = $true
-        return $true
-    }
-
-    $assemblyNames = @(
-        'System.Security.Cryptography.ProtectedData',
-        'System.Security',
-        'System.Security.Cryptography'
-    )
-
-    foreach ($assemblyName in $assemblyNames) {
-        try {
-            Add-Type -AssemblyName $assemblyName -ErrorAction Stop | Out-Null
-        } catch {
-            continue
-        }
-
-        if (Get-ProtectedDataType) {
-            $script:ProtectedDataReady = $true
-            return $true
-        }
-    }
-
-    Write-Log -Message 'System.Security.Cryptography.ProtectedData type is unavailable; DPAPI decryption will be skipped.' -Level 'ERROR'
-    return $false
-}
-
-function Get-ChromeEncryptionKey {
-    [CmdletBinding()]
-    param([Parameter(Mandatory=$true)][string]$UserDataPath)
-
-    $localStatePath = Join-Path $UserDataPath 'Local State'
-    if (-not (Test-Path $localStatePath)) {
-        Write-Log -Message "Chrome Local State not found at $localStatePath" -Level 'WARN'
-        return $null
-    }
-
-    try {
-        $json = Get-Content -Path $localStatePath -Raw -ErrorAction Stop
-        $state = $json | ConvertFrom-Json
-        $encryptedKey = $state.os_crypt.encrypted_key
-        if (-not $encryptedKey) {
-            Write-Log -Message 'Chrome Local State does not contain an encrypted_key entry.' -Level 'WARN'
-            return $null
-        }
-
-        $keyBytes = [System.Convert]::FromBase64String($encryptedKey)
-        $prefix = [System.Text.Encoding]::ASCII.GetBytes('DPAPI')
-        if ($keyBytes.Length -le $prefix.Length) {
-            Write-Log -Message 'Chrome encrypted_key value is shorter than expected.' -Level 'WARN'
-            return $null
-        }
-
-        $payload = New-Object byte[] ($keyBytes.Length - $prefix.Length)
-        [Array]::Copy($keyBytes, $prefix.Length, $payload, 0, $payload.Length)
-        if (-not (Ensure-ProtectedDataSupport)) {
-            return $null
-        }
-        return [System.Security.Cryptography.ProtectedData]::Unprotect(
-            $payload,
-            $null,
-            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
-        )
-    } catch {
-        Write-Log -Message ("Failed to obtain Chrome encryption key: {0}" -f $_) -Level 'ERROR'
-        return $null
-    }
-}
-
-function ConvertFrom-ChromeSecret {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory=$true)][byte[]]$Data,
-        [byte[]]$Key
-    )
-
-    if (-not $Data -or $Data.Length -eq 0) { return '' }
-
-    $prefix = if ($Data.Length -ge 3) { [System.Text.Encoding]::ASCII.GetString($Data, 0, 3) } else { '' }
-
-    try {
-        $isVersioned = $prefix -and ($prefix -match '^v\d{2}$')
-        if ($isVersioned -and $Key -and $Key.Length -gt 0 -and (Ensure-BouncyCastleAssembly)) {
-
-            $nonceLength = 12
-            if ($Data.Length -ge (3 + $nonceLength + 16)) {
-                try {
-                    $nonce = New-Object byte[] $nonceLength
-                    [Array]::Copy($Data, 3, $nonce, 0, $nonceLength)
-
-                    $cipherTextLength = $Data.Length - 3 - $nonceLength
-                    $cipherTextAndTag = New-Object byte[] $cipherTextLength
-                    [Array]::Copy($Data, 3 + $nonceLength, $cipherTextAndTag, 0, $cipherTextLength)
-
-                    $engine = New-Object Org.BouncyCastle.Crypto.Engines.AesEngine
-                    $cipher = New-Object Org.BouncyCastle.Crypto.Modes.GcmBlockCipher ($engine)
-                    $keyParam = [Org.BouncyCastle.Crypto.Parameters.KeyParameter]::new($Key)
-                    $parameters = New-Object Org.BouncyCastle.Crypto.Parameters.AeadParameters ($keyParam, 128, $nonce, $null)
-                    $cipher.Init($false, $parameters)
-
-
-                    $output = New-Object byte[] ($cipher.GetOutputSize($cipherTextAndTag.Length))
-                    $bytesProcessed = $cipher.ProcessBytes($cipherTextAndTag, 0, $cipherTextAndTag.Length, $output, 0)
-                    $bytesProcessed += $cipher.DoFinal($output, $bytesProcessed)
-
-                    return ([System.Text.Encoding]::UTF8.GetString($output, 0, $bytesProcessed)).TrimEnd([char]0)
-                } catch {
-                    Write-Log -Message ("Chrome AES-GCM decryption failed; falling back to DPAPI: {0}" -f $_) -Level 'WARN'
-                }
-            }
-        }
-
-        if (-not (Ensure-ProtectedDataSupport)) {
-            return ''
-        }
-
-        $dpapiBytes = $null
-        $lastError = $null
-        foreach ($scope in @([System.Security.Cryptography.DataProtectionScope]::CurrentUser, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)) {
-            try {
-                $dpapiBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
-                    $Data,
-                    $null,
-                    $scope
-                )
-                $lastError = $null
-                break
-            } catch {
-                $lastError = $_
-                $dpapiBytes = $null
-            }
-        }
-
-        if ($null -eq $dpapiBytes) {
-            if ($lastError) { throw $lastError }
-            return ''
-        }
-        return ([System.Text.Encoding]::UTF8.GetString($dpapiBytes)).TrimEnd([char]0)
-    } catch {
-        Write-Log -Message ("Failed to decrypt Chrome secret: {0}" -f $_) -Level 'WARN'
-        return ''
-    }
-}
-
-function Export-ChromePasswords {
-    [CmdletBinding()]
-    param([switch]$ShowSummary)
+    param()
 
     $repoRoot = Get-SwapInfoRoot
     if (-not $repoRoot) {
-        if ($tbDest -and $tbDest.Text) {
-            try {
-                $null = Ensure-Repository -BasePath $tbDest.Text -OpenFolder:$false
-                $repoRoot = Get-SwapInfoRoot
-            } catch {}
-        }
-
-        if (-not $repoRoot) {
-            Write-Log -Message 'SwapInfoRoot not set before Chrome export; aborting' -Level 'ERROR'
-            if ($ShowSummary) {
-                [System.Windows.Forms.MessageBox]::Show('Unable to determine repository path for Chrome export.', 'Chrome Password Export', 'OK', 'Error') | Out-Null
-            }
-            return $false
-        }
+        Write-Log -Message 'SwapInfoRoot not set when displaying Chrome export guidance.' -Level 'WARN'
     }
 
-    if (-not (Ensure-SqliteAssembly)) {
-        if ($ShowSummary) {
-            [System.Windows.Forms.MessageBox]::Show('SQLite dependency missing. See log for details.', 'Chrome Password Export', 'OK', 'Error') | Out-Null
-        }
-        return $false
-    }
+    $targetPath = if ($repoRoot) { Join-Path $repoRoot $ChromeCsvName } else { $ChromeCsvName }
 
-    $chromeRoot = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data' } else { $null }
-    if (-not $chromeRoot -or -not (Test-Path $chromeRoot)) {
-        Write-Log -Message 'Chrome user data folder not found; skipping password export.' -Level 'WARN'
-        if ($ShowSummary) {
-            [System.Windows.Forms.MessageBox]::Show('Google Chrome user data was not found for the current user.', 'Chrome Password Export', 'OK', 'Warning') | Out-Null
-        }
-        return $false
-    }
+    $instructions = @"
+Chrome passwords must be exported manually by the technician.
 
-    $encryptionKey = Get-ChromeEncryptionKey -UserDataPath $chromeRoot
-    if (-not $encryptionKey) {
-        Write-Log -Message 'Chrome AES encryption key unavailable; will attempt DPAPI fallback for each credential.' -Level 'WARN'
-    }
+1. Sign in to the user's Chrome profile on this machine.
+2. Open Google Chrome and browse to chrome://settings/passwords.
+3. In ""Saved Passwords"", open the three-dot menu and choose ""Export passwords"".
+4. Approve the Windows security prompt when asked to confirm the export.
+5. Save the CSV as ""$ChromeCsvName"" in the repository folder shown below:
+   $targetPath
 
-    $profiles = @(Get-ChildItem -Path $chromeRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
-        Test-Path (Join-Path $_.FullName 'Login Data')
-    })
+If Chrome is not installed or has no saved passwords, note that outcome in the technician report.
+"@
 
-    if ($profiles.Count -eq 0) {
-        Write-Log -Message 'No Chrome profiles with saved passwords were found.' -Level 'WARN'
-        if ($ShowSummary) {
-            [System.Windows.Forms.MessageBox]::Show('No Chrome profiles containing saved passwords were found.', 'Chrome Password Export', 'OK', 'Information') | Out-Null
-        }
-        return $false
-    }
+    Write-Log -Message 'Displayed manual Chrome password export instructions.'
+    [System.Windows.Forms.MessageBox]::Show($instructions, 'Chrome Password Export', 'OK', 'Information') | Out-Null
 
-    $entries = New-Object System.Collections.Generic.List[object]
-    $processedProfiles = @()
-
-    foreach ($profile in $profiles) {
-        $dbPath = Join-Path $profile.FullName 'Login Data'
-        $tempPath = Join-Path ([System.IO.Path]::GetTempPath()) ("chrome_login_{0}_{1}.db" -f ($profile.Name -replace '[^a-zA-Z0-9_-]', '_'), [System.Guid]::NewGuid().ToString('N'))
-
-        try {
-            [System.IO.File]::Copy($dbPath, $tempPath, $true)
-        } catch {
-            Write-Log -Message ("Failed to copy Chrome Login Data from profile {0}: {1}" -f $profile.FullName, $_) -Level 'WARN'
-            continue
-        }
-
-        $connection = $null
-        $command = $null
-        $reader = $null
-
-        try {
-            $connection = New-Object System.Data.SQLite.SQLiteConnection ("Data Source=$tempPath;Version=3;Read Only=True;")
-            $connection.Open()
-
-            $command = $connection.CreateCommand()
-            $command.CommandText = 'SELECT origin_url, action_url, username_value, password_value FROM logins WHERE length(password_value) > 0'
-            $reader = $command.ExecuteReader()
-
-            $profileHadEntries = $false
-            while ($reader.Read()) {
-                $origin = if (-not $reader.IsDBNull(0)) { $reader.GetString(0) } else { '' }
-                $action = if (-not $reader.IsDBNull(1)) { $reader.GetString(1) } else { '' }
-                $username = if (-not $reader.IsDBNull(2)) { $reader.GetString(2) } else { '' }
-                $secret = if (-not $reader.IsDBNull(3)) { [byte[]]$reader.GetValue(3) } else { $null }
-
-                if (-not $secret -or $secret.Length -eq 0) { continue }
-
-                $password = ConvertFrom-ChromeSecret -Data $secret -Key $encryptionKey
-                if ([string]::IsNullOrEmpty($password)) { continue }
-
-                $entries.Add([PSCustomObject]@{
-                        Profile   = $profile.Name
-                        OriginUrl = $origin
-                        ActionUrl = $action
-                        Username  = $username
-                        Password  = $password
-                    }) | Out-Null
-                $profileHadEntries = $true
-            }
-
-            if ($profileHadEntries) {
-                $processedProfiles += $profile.Name
-            }
-        } catch {
-            Write-Log -Message ("Failed to read Chrome passwords for profile {0}: {1}" -f $profile.FullName, $_) -Level 'WARN'
-        } finally {
-            if ($reader) { $reader.Close(); $reader.Dispose() }
-            if ($command) { $command.Dispose() }
-            if ($connection) { $connection.Close(); $connection.Dispose() }
-            if (Test-Path $tempPath) {
-                Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
-
-    $destPath = Join-Path $repoRoot $ChromeCsvName
-
-    if ($entries.Count -eq 0) {
-        if (Test-Path $destPath) {
-            try {
-                Remove-Item -Path $destPath -Force -ErrorAction Stop
-            } catch {
-                Write-Log -Message ("Failed to remove stale Chrome password CSV at {0}: {1}" -f $destPath, $_) -Level 'WARN'
-            }
-        }
-
-        Write-Log -Message 'Chrome password export completed; no decryptable credentials were found. No CSV was created.' -Level 'WARN'
-        if ($ShowSummary) {
-            [System.Windows.Forms.MessageBox]::Show('No Chrome passwords were decrypted. No export file was created.', 'Chrome Password Export', 'OK', 'Warning') | Out-Null
-        }
-        return $false
-    }
-
-    $success = $false
-
-    try {
-        $entries | Select-Object Profile, OriginUrl, ActionUrl, Username, Password | Export-Csv -Path $destPath -NoTypeInformation -Encoding UTF8
-        $success = $true
-    } catch {
-        Write-Log -Message ("Failed to write Chrome password CSV: {0}" -f $_) -Level 'ERROR'
-    }
-
-    $profileList = ($processedProfiles | Sort-Object -Unique) -join ', '
-    if ([string]::IsNullOrWhiteSpace($profileList)) {
-        $profileList = 'Unknown'
-    }
-
-    if ($success) {
-        Write-Log -Message ("Chrome password export complete. Profiles: {0}; Entries: {1}; Output: {2}" -f $profileList, $entries.Count, $destPath)
-    }
-
-    if ($ShowSummary) {
-        if ($success) {
-            $msg = "Chrome passwords exported to:`n$destPath`nEntries: $($entries.Count)"
-            [System.Windows.Forms.MessageBox]::Show($msg, 'Chrome Password Export', 'OK', 'Information') | Out-Null
-        } else {
-            [System.Windows.Forms.MessageBox]::Show('Chrome password export failed. Review the log for details.', 'Chrome Password Export', 'OK', 'Error') | Out-Null
-        }
-    }
-
-    return $success
+    return $true
 }
-
 
 
 # Capture a screenshot of every attached display and save the images under the
@@ -1287,7 +865,7 @@ function Write-Report { param($Manifest,$CopySummary)
     $L += ""
     $L += "---- Summary ----"
     $L += "Include OneDrive: $($Manifest.IncludeOneDrive)"
-    $L += "Chrome CSV present: $($Manifest.ChromeCsv)"
+    $L += "Chrome passwords CSV present (manual export): $($Manifest.ChromeCsv)"
     $L += "Wallpaper copied: $($Manifest.WallpaperCopied)"
     $L += "Outlook signatures: $($Manifest.SignaturesCopied)"
     $L += "Desktop screenshots captured: $(($Manifest.DesktopScreenshots -and $Manifest.DesktopScreenshots.Count -gt 0))"
@@ -1653,7 +1231,7 @@ if ($DestinationPath) { $tbDest.Text = $DestinationPath }
 if ($PSBoundParameters.ContainsKey('IncludeOneDrive')) { $cbOneDrive.Checked = [bool]$IncludeOneDrive }
 if ($PSBoundParameters.ContainsKey('SkipProfileCopy')) { $cbSkipCopy.Checked = [bool]$SkipProfileCopy }
 if ($PSBoundParameters.ContainsKey('CaptureOutlookCredentials')) { $cbOutlookCred.Checked = [bool]$CaptureOutlookCredentials }
-$btnChrome = New-Object System.Windows.Forms.Button; $btnChrome.Text = "Export Chrome Passwords"; $btnChrome.SetBounds(10,100,240,30); $btnChrome.Add_Click({ Export-ChromePasswords -ShowSummary | Out-Null })
+$btnChrome = New-Object System.Windows.Forms.Button; $btnChrome.Text = "Export Chrome Passwords"; $btnChrome.SetBounds(10,100,240,30); $btnChrome.Add_Click({ Show-ChromePasswordExportGuide | Out-Null })
 $btnWallpaper = New-Object System.Windows.Forms.Button; $btnWallpaper.Text = "Copy Current Wallpaper"; $btnWallpaper.SetBounds(260,100,180,30); $btnWallpaper.Add_Click({ Copy-Wallpaper | Out-Null })
 $btnSignatures = New-Object System.Windows.Forms.Button; $btnSignatures.Text = "Copy Outlook Signatures"; $btnSignatures.SetBounds(450,100,200,30); $btnSignatures.Add_Click({ Copy-OutlookSignatures | Out-Null })
 $btnDeregEdit = New-Object System.Windows.Forms.Button; $btnDeregEdit.Text = "Edit Deregistration List"; $btnDeregEdit.SetBounds(660,100,170,30); $btnDeregEdit.Add_Click({
@@ -1749,8 +1327,8 @@ $btnStartGather.Add_Click({
     # Export wireless profiles to repository (WLAN profiles)
     if (Get-Command Export-WlanProfiles -ErrorAction SilentlyContinue) { $null = Export-WlanProfiles }
 
-    # 5) Export Chrome passwords (repo exists now)
-    if (Get-Command Export-ChromePasswords -ErrorAction SilentlyContinue) { $null = Export-ChromePasswords }
+    # 5) Remind technician to export Chrome passwords manually (repo exists now)
+    if (Get-Command Show-ChromePasswordExportGuide -ErrorAction SilentlyContinue) { $null = Show-ChromePasswordExportGuide }
 
     # 5.5) If capturing Outlook credentials, prompt now (before manifest build) and store in global
     if ($cbOutlookCred.Checked) {

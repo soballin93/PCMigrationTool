@@ -152,7 +152,11 @@ param(
     [switch]$Resume,
     [switch]$ResumeUser,
     [string]$LogoPath,
-    [string]$Manifest
+    [string]$Manifest,
+    [string]$DestinationPath,
+    [switch]$IncludeOneDrive,
+    [switch]$SkipProfileCopy,
+    [switch]$CaptureOutlookCredentials
 )
 
 Set-StrictMode -Version Latest
@@ -1085,6 +1089,10 @@ $cbOutlookCred = New-Object System.Windows.Forms.CheckBox
 $cbOutlookCred.Text = "Capture Outlook credentials for restore"
 $cbOutlookCred.SetBounds(10,85,350,20)
 $cbOutlookCred.Checked = $false
+if ($DestinationPath) { $tbDest.Text = $DestinationPath }
+if ($PSBoundParameters.ContainsKey('IncludeOneDrive')) { $cbOneDrive.Checked = [bool]$IncludeOneDrive }
+if ($PSBoundParameters.ContainsKey('SkipProfileCopy')) { $cbSkipCopy.Checked = [bool]$SkipProfileCopy }
+if ($PSBoundParameters.ContainsKey('CaptureOutlookCredentials')) { $cbOutlookCred.Checked = [bool]$CaptureOutlookCredentials }
 $btnChrome = New-Object System.Windows.Forms.Button; $btnChrome.Text = "Guide Chrome Password Export"; $btnChrome.SetBounds(10,100,240,30); $btnChrome.Add_Click({ Guide-ChromePasswordExport | Out-Null })
 $btnWallpaper = New-Object System.Windows.Forms.Button; $btnWallpaper.Text = "Copy Current Wallpaper"; $btnWallpaper.SetBounds(260,100,180,30); $btnWallpaper.Add_Click({ Copy-Wallpaper | Out-Null })
 $btnSignatures = New-Object System.Windows.Forms.Button; $btnSignatures.Text = "Copy Outlook Signatures"; $btnSignatures.SetBounds(450,100,200,30); $btnSignatures.Add_Click({ Copy-OutlookSignatures | Out-Null })

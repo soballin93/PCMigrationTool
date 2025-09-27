@@ -2,7 +2,7 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.32 (2025-10-03)
+    Version: 0.5.33 (2025-10-04)
 
 
 
@@ -13,6 +13,14 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.33
+      - Restore: Replace the automatic reboot with a technician prompt that reboots the
+        workstation when they confirm, keeping the workflow in sync with hostname/domain
+        changes.
+      - Restore: Defer default-apps guidance until the user-context resume so the target
+        account performs the configuration, and restart Windows Explorer after profile
+        copy to refresh the restored wallpaper.
+      - Date: 2025-10-04
     0.5.32
       - Fix: Run restore resume scheduled tasks with the highest privileges so
         Robocopy can write to C:\Users during user logon restores.
@@ -224,7 +232,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.32'
+$ProgramVersion = '0.5.33'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -1166,6 +1174,46 @@ function Prompt-NewHostname { param([string]$OldHostname)
     $f.Controls.AddRange(@($l,$tb,$ok,$cancel)); $f.AcceptButton=$ok; $f.CancelButton=$cancel
     if($f.ShowDialog() -eq 'OK'){ $tb.Text } else { $null }
 }
+function Show-RestoreRebootPrompt {
+    Add-Type -AssemblyName System.Windows.Forms | Out-Null
+    Add-Type -AssemblyName System.Drawing    | Out-Null
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = 'Reboot Required'
+    $form.Width = 520; $form.Height = 220
+    $form.StartPosition = 'CenterScreen'
+    $form.FormBorderStyle = 'FixedDialog'
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+    $form.TopMost = $true
+
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = "Please use the button to reboot the workstation. Once rebooted, login as the target user and allow the script to finish."
+    $label.AutoSize = $true
+    $label.MaximumSize = New-Object System.Drawing.Size(480,0)
+    $label.Location = New-Object System.Drawing.Point(15,20)
+
+    $button = New-Object System.Windows.Forms.Button
+    $button.Text = 'Reboot Now'
+    $button.Width = 140; $button.Height = 35
+    $button.Location = New-Object System.Drawing.Point(185,130)
+    $button.Add_Click({
+        $this.Enabled = $false
+        try { Write-Log -Message 'Technician confirmed reboot from restore prompt.' } catch {}
+        try { $form.Hide() } catch {}
+        try {
+            Restart-Computer -Force
+        } catch {
+            try { Write-Log -Message ("Failed to restart from restore prompt: {0}" -f $_) -Level 'ERROR' } catch {}
+            try { $form.Show() } catch {}
+            try { $this.Enabled = $true } catch {}
+            [System.Windows.Forms.MessageBox]::Show('Automatic reboot failed. Please reboot the workstation manually.','Reboot Error','OK','Error') | Out-Null
+        }
+    })
+
+    $form.Controls.AddRange(@($label,$button))
+    [void]$form.ShowDialog()
+}
 function Restore-Network { param($Manifest)
     try{
         $adapters=$Manifest.Computer.NetworkAdapters; if(-not $adapters){ Write-Log -Message "No adapters in manifest; skipping network restore." -Level 'WARN'; return }
@@ -1193,6 +1241,33 @@ function Restore-WallpaperAndSignatures {
         $wpSrc=Join-Path $repoRoot $WallpaperName; if(Test-Path $wpSrc){ $wpDst=Join-Path $env:APPDATA 'Microsoft\Windows\Themes\TranscodedWallpaper'; Copy-Safe -Source $wpSrc -Dest $wpDst | Out-Null }
         $sigSrc=Join-Path $repoRoot 'Signatures'; if(Test-Path $sigSrc){ $sigDst=Join-Path $env:APPDATA 'Microsoft\Signatures'; New-Item -ItemType Directory -Path $sigDst -Force|Out-Null; Copy-Item (Join-Path $sigSrc '*') $sigDst -Recurse -Force; Write-Log -Message "Signatures restored." }
     }catch{ Write-Log -Message "Restore wallpaper/signatures failed: $_" -Level 'ERROR' }
+}
+function Restart-WindowsExplorer {
+    try {
+        $stopped = 0
+        $existing = @(Get-Process -Name explorer -ErrorAction SilentlyContinue)
+        if ($existing.Count -gt 0) {
+            foreach ($proc in $existing) {
+                if ($proc -and -not $proc.HasExited) {
+                    try {
+                        $proc.Kill()
+                        $stopped++
+                    } catch {
+                        Write-Log -Message ("Failed to terminate explorer.exe PID {0}: {1}" -f $proc.Id, $_) -Level 'WARN'
+                    }
+                }
+            }
+            Start-Sleep -Milliseconds 500
+        }
+        Start-Process explorer.exe | Out-Null
+        if ($stopped -gt 0) {
+            Write-Log -Message "Windows Explorer restarted to refresh the restored desktop."
+        } else {
+            Write-Log -Message "Windows Explorer started to refresh the restored desktop."
+        }
+    } catch {
+        Write-Log -Message "Failed to restart Windows Explorer after profile copy: $_" -Level 'WARN'
+    }
 }
 function Open-DefaultAppsGuidance {
     [System.Diagnostics.Process]::Start("ms-settings:defaultapps") | Out-Null
@@ -1663,18 +1738,23 @@ $btnStartRestore.Add_Click({
         if ($manDir) { Set-SwapInfoRoot -RepoRoot $manDir }
     } catch {}
 
+    $needReboot = $false
+
     $newName = Prompt-NewHostname -OldHostname $manifest.Computer.Hostname
-    if ([string]::IsNullOrWhiteSpace($newName)) { Write-Log -Message "Hostname change cancelled by technician." -Level 'WARN' } 
+    if ([string]::IsNullOrWhiteSpace($newName)) { Write-Log -Message "Hostname change cancelled by technician." -Level 'WARN' }
     else {
         if ($newName -ieq $manifest.Computer.Hostname) {
             [System.Windows.Forms.MessageBox]::Show("New hostname must DIFFER from old hostname.","Invalid Name",'OK','Error') | Out-Null; return
         }
-        try { Rename-Computer -NewName $newName -ErrorAction Stop; Write-Log -Message "Hostname set to $newName (pending reboot)." } catch { Write-Log -Message "Failed to rename computer: $_" -Level 'ERROR' }
+        try {
+            Rename-Computer -NewName $newName -ErrorAction Stop
+            $needReboot = $true
+            Write-Log -Message "Hostname set to $newName (pending reboot)."
+        } catch { Write-Log -Message "Failed to rename computer: $_" -Level 'ERROR' }
     }
 
     $domain = $tbDomain.Text.Trim()
     $ou     = $tbOU.Text.Trim()
-    $needReboot = $false
     $createdLocalUser = $false
     $targetLocalUser  = $null
 
@@ -1724,10 +1804,9 @@ $btnStartRestore.Add_Click({
         Write-Log -Message 'Unable to determine script path for resume scheduling.' -Level 'WARN'
     }
 
-    if ($domain -or $newName) {
-        [System.Windows.Forms.MessageBox]::Show("System needs to reboot to continue restore. After reboot, log into the intended user to complete file restore.","Reboot Required",'OK','Information') | Out-Null
-        Write-Log -Message "Rebooting to continue restore."
-        Restart-Computer -Force
+    if ($needReboot) {
+        Write-Log -Message "Reboot required to continue restore; prompting technician."
+        Show-RestoreRebootPrompt
         return
     }
 
@@ -1744,7 +1823,7 @@ $btnStartRestore.Add_Click({
         }
     } catch { Write-Log -Message "Wireless profile import error: $($_)" -Level 'WARN' }
     Restore-WallpaperAndSignatures
-    Open-DefaultAppsGuidance
+    # Default app configuration is deferred until the target user logs in.
     # Do not show Outlook credentials during system-context restore; this will be handled in user context
     Write-Log -Message "=== RESTORE END ==="
 })
@@ -1796,7 +1875,6 @@ if ($Resume) {
                 }
             } catch { Write-Log -Message "Wireless profile import error (resume): $($_)" -Level 'WARN' }
             Restore-WallpaperAndSignatures
-            Open-DefaultAppsGuidance
             Write-Log -Message "Post-join steps executed."
         } else {
             Write-Log -Message "Manifest missing on resume (path: $manifestPath)." -Level 'ERROR'
@@ -1850,6 +1928,7 @@ if ($ResumeUser) {
             $summary = Copy-ProfileToUser -SourceFolder $src -TargetUserName $targetUser -IncludeOneDrive:$incl
             Write-Log -Message $summary
             Restore-WallpaperAndSignatures
+            Restart-WindowsExplorer
             Open-DefaultAppsGuidance
             $manifest = $null
             if ($manifestPath) {

@@ -2,7 +2,7 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.28 (2025-09-29)
+    Version: 0.5.30 (2025-10-01)
 
 
 
@@ -12,6 +12,16 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.30
+      - Fix: Prevent resume logging from triggering invalid variable reference errors
+        when the script runs from an in-memory invocation.
+      - Date: 2025-10-01
+
+    0.5.29
+      - Fix: Persist the script to a local cache when invoked from memory so
+        restore resume tasks have a valid file path when scheduled.
+      - Date: 2025-09-30
+
     0.5.28
       - Fix: Preserve the script path when registering resume actions so restore
         tasks schedule correctly even when $PSCommandPath is blank.
@@ -206,7 +216,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.28'
+$ProgramVersion = '0.5.30'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -217,6 +227,7 @@ $StatePath      = $null
 $DeregListPath = $null
 $ChromeCsvName  = 'Chrome Passwords.csv'
 $WallpaperName  = 'TranscodedWallpaper'
+$ScriptFileName = 'PCSwapTool_v0.5.20.ps1'
 
 $script:ToolRoot = try {
     $cmdPath = $MyInvocation.MyCommand.Path
@@ -247,6 +258,13 @@ $script:ScriptInvocationPath = try {
     $null
 }
 
+$script:ScriptDefinition = try {
+    $MyInvocation.MyCommand.ScriptBlock
+} catch {
+    $null
+}
+$script:PersistedScriptPath = $null
+
 # Ensure the repository-scoped globals are also available in the global scope so
 # that event handlers executed outside the original script scope can see them
 # when the script is invoked from an in-memory script block (e.g. irm | iex).
@@ -255,6 +273,8 @@ $global:StatePath = $StatePath
 $global:DeregListPath = $DeregListPath
 $global:LogPath = $LogPath
 $global:ScriptInvocationPath = $script:ScriptInvocationPath
+$global:ScriptDefinition = $script:ScriptDefinition
+$global:PersistedScriptPath = $script:PersistedScriptPath
 
 # If a manifest path is supplied on the command line, it will be captured here and used
 # during resume phases instead of reading state.json.  This allows the restore flow
@@ -589,12 +609,81 @@ function Test-Admin {
 function Ensure-AdminOrWarn { if(-not (Test-Admin)){ Write-Log -Message "Not running elevated. Some operations may fail." -Level 'WARN' } }
 function Save-Json { param($Object,[string]$Path,[int]$Depth=8) ($Object|ConvertTo-Json -Depth $Depth)|Set-Content -Path $Path -Encoding UTF8 }
 function Load-Json { param([string]$Path) if(Test-Path $Path){ try{ (Get-Content -Raw -Path $Path|ConvertFrom-Json) }catch{ Write-Log -Message ("Parse JSON fail {0}: {1}" -f $Path, $_) -Level 'ERROR' } } }
+function Get-ExecutableScriptPath {
+    [CmdletBinding()]
+    param()
+
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) { $candidates += $PSCommandPath }
+    foreach ($candidate in @($script:ScriptInvocationPath, $global:ScriptInvocationPath, $script:PersistedScriptPath, $global:PersistedScriptPath)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) { $candidates += $candidate }
+    }
+
+    foreach ($candidate in ($candidates | Select-Object -Unique)) {
+        try {
+            if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate)) {
+                return $candidate
+            }
+        } catch {
+            Write-Log -Message ("Failed to validate script path candidate {0}: {1}" -f $candidate, $_) -Level 'WARN'
+        }
+    }
+
+    $scriptBlock = if ($script:ScriptDefinition) { $script:ScriptDefinition } elseif ($global:ScriptDefinition) { $global:ScriptDefinition } else { $null }
+    if (-not $scriptBlock) {
+        Write-Log -Message 'Unable to locate script definition for resume scheduling.' -Level 'WARN'
+        return $null
+    }
+
+    $definition = try { $scriptBlock.ToString() } catch {
+        Write-Log -Message ("Failed to extract script definition for persistence: {0}" -f $_) -Level 'ERROR'
+        $null
+    }
+    if ([string]::IsNullOrWhiteSpace($definition)) {
+        Write-Log -Message 'Script definition was empty; cannot persist executable script.' -Level 'WARN'
+        return $null
+    }
+
+    $baseDir = $null
+    if ($env:ProgramData -and -not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+        $baseDir = Join-Path $env:ProgramData 'PCSwapTool'
+    } elseif ($env:TEMP -and -not [string]::IsNullOrWhiteSpace($env:TEMP)) {
+        $baseDir = Join-Path $env:TEMP 'PCSwapTool'
+    } else {
+        $baseDir = Join-Path (Get-Location).Path 'PCSwapTool'
+    }
+
+    try {
+        if (-not (Test-Path -LiteralPath $baseDir)) {
+            New-Item -ItemType Directory -Path $baseDir -Force | Out-Null
+        }
+    } catch {
+        Write-Log -Message ("Failed to ensure script cache directory {0}: {1}" -f $baseDir, $_) -Level 'ERROR'
+        return $null
+    }
+
+    $persistPath = Join-Path $baseDir $ScriptFileName
+    try {
+        Set-Content -Path $persistPath -Value $definition -Encoding UTF8
+        Write-Log -Message "Persisted script for resume scheduling: $persistPath"
+        $script:PersistedScriptPath = $persistPath
+        $global:PersistedScriptPath = $script:PersistedScriptPath
+        return $persistPath
+    } catch {
+        Write-Log -Message ("Failed to persist script for resume scheduling: {0}" -f $_) -Level 'ERROR'
+        return $null
+    }
+}
 function New-RunOnceResume {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true)][string]$ScriptPath,
         [string]$ManifestPath
     )
+    if (-not (Test-Path -LiteralPath $ScriptPath)) {
+        Write-Log -Message "RunOnce resume registration skipped; script path not found: $ScriptPath" -Level 'ERROR'
+        return
+    }
     # Build the command to run at next boot.  Always include -Resume; append -Manifest with path if provided.
     $args = '-Resume'
     if ($ManifestPath) { $args += " -Manifest \`"$ManifestPath\`"" }
@@ -1280,6 +1369,10 @@ function Register-UserResumeTaskEx {
     )
     try {
         $taskName = 'PCSwap-Resume-User'
+        if (-not (Test-Path -LiteralPath $ScriptPath)) {
+            Write-Log -Message "Register-UserResumeTaskEx skipped; script path not found: $ScriptPath" -Level 'ERROR'
+            return $false
+        }
         # Build the argument list as an array to avoid quoting issues
         $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ScriptPath`"", '-ResumeUser')
         if ($ManifestPath) { $argList += @('-Manifest', "`"$ManifestPath`"") }
@@ -1615,12 +1708,12 @@ $btnStartRestore.Add_Click({
     }
     # Include manifest path when scheduling resume tasks so the resume phases can load
     # the correct manifest without relying on state.json alone.
-    $resumeScriptPath = if (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) { $PSCommandPath } else { $global:ScriptInvocationPath }
+    $resumeScriptPath = Get-ExecutableScriptPath
     if (-not [string]::IsNullOrWhiteSpace($resumeScriptPath)) {
         New-RunOnceResume -ScriptPath $resumeScriptPath -ManifestPath $tbMan.Text
         if ($createdLocalUser) { Register-UserResumeTaskEx -UserName $targetLocalUser -ScriptPath $resumeScriptPath -ManifestPath $tbMan.Text | Out-Null }
     } else {
-        Write-Log -Message 'Unable to resolve script path for resume registration.' -Level 'ERROR'
+        Write-Log -Message 'Unable to determine script path for resume scheduling.' -Level 'WARN'
     }
 
     if ($domain -or $newName) {

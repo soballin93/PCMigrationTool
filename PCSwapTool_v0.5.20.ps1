@@ -953,10 +953,12 @@ function Write-Report { param($Manifest,$CopySummary)
             if ($rawShots -is [System.Collections.IEnumerable] -and -not ($rawShots -is [string])) {
                 $desktopScreenshots = @($rawShots | Where-Object { $_ })
             } else {
-                $desktopScreenshots = @($rawShots) | Where-Object { $_ }
+                $desktopScreenshots = @(@($rawShots) | Where-Object { $_ })
             }
         }
     }
+    $desktopScreenshots = @($desktopScreenshots | Where-Object { $_ })
+    $desktopScreenshotCount = $desktopScreenshots.Count
     $rp=Join-Path $repoRoot $ReportName
     $L=@()
     $L += "PC Swap Technician Report - $($Manifest.General.ComputerName)"
@@ -968,7 +970,7 @@ function Write-Report { param($Manifest,$CopySummary)
     $L += "Chrome passwords CSV present (manual export): $($Manifest.ChromeCsv)"
     $L += "Wallpaper copied: $($Manifest.WallpaperCopied)"
     $L += "Outlook signatures: $($Manifest.SignaturesCopied)"
-    $L += "Desktop screenshots captured: $($desktopScreenshots.Count -gt 0)"
+    $L += "Desktop screenshots captured: $($desktopScreenshotCount -gt 0)"
     $L += ""
     $L += "---- Network ----"
     foreach($n in $Manifest.Computer.NetworkAdapters){ $L += "Adapter: $($n.InterfaceAlias) IP: $($n.IPv4Address)/$($n.SubnetMask) GW: $($n.DefaultGateway) DNS: $($n.DnsServers) DHCP: $($n.DhcpEnabled) MAC: $($n.MacAddress)" }
@@ -999,7 +1001,7 @@ function Write-Report { param($Manifest,$CopySummary)
     foreach($i in $Manifest.DeregChecklist){ $L += "[{0}] {1}  ({2})" -f ($(if($i.completed){'X'}else{' '})), $i.name, $i.notes }
     if($CopySummary){ $L += ""; $L += "---- Copy Summary ----"; $L += $CopySummary }
 
-    if ($desktopScreenshots.Count -gt 0) {
+    if ($desktopScreenshotCount -gt 0) {
         $L += ""
         $L += "---- Desktop Screenshots ----"
         foreach ($shot in $desktopScreenshots) { $L += $shot }

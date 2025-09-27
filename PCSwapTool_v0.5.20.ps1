@@ -2,7 +2,7 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.24 (2025-09-27)
+    Version: 0.5.25 (2025-09-27)
 
 
 
@@ -12,6 +12,11 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.25
+      - Fix: Fall back to DPAPI when Chrome AES-GCM secrets fail authentication
+        so legacy DPAPI entries with "vXX" prefixes still decrypt correctly.
+      - Date: 2025-09-27
+
     0.5.24
       - Fix: Instantiate the Chrome AES key parameter without splatting individual
         bytes so BouncyCastle accepts 32-byte keys on newer builds.
@@ -187,7 +192,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.24'
+$ProgramVersion = '0.5.25'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -917,37 +922,35 @@ function ConvertFrom-ChromeSecret {
     $prefix = if ($Data.Length -ge 3) { [System.Text.Encoding]::ASCII.GetString($Data, 0, 3) } else { '' }
 
     try {
-        if ($prefix -and ($prefix -match '^v\d{2}$')) {
-            if (-not $Key -or $Key.Length -eq 0) {
-                return ''
-            }
-            if (-not (Ensure-BouncyCastleAssembly)) {
-                return ''
-            }
+        $isVersioned = $prefix -and ($prefix -match '^v\d{2}$')
+        if ($isVersioned -and $Key -and $Key.Length -gt 0 -and (Ensure-BouncyCastleAssembly)) {
 
             $nonceLength = 12
-            if ($Data.Length -lt (3 + $nonceLength + 16)) {
-                return ''
+            if ($Data.Length -ge (3 + $nonceLength + 16)) {
+                try {
+                    $nonce = New-Object byte[] $nonceLength
+                    [Array]::Copy($Data, 3, $nonce, 0, $nonceLength)
+
+                    $cipherTextLength = $Data.Length - 3 - $nonceLength
+                    $cipherTextAndTag = New-Object byte[] $cipherTextLength
+                    [Array]::Copy($Data, 3 + $nonceLength, $cipherTextAndTag, 0, $cipherTextLength)
+
+                    $engine = New-Object Org.BouncyCastle.Crypto.Engines.AesEngine
+                    $cipher = New-Object Org.BouncyCastle.Crypto.Modes.GcmBlockCipher ($engine)
+                    $keyParam = [Org.BouncyCastle.Crypto.Parameters.KeyParameter]::new($Key)
+                    $parameters = New-Object Org.BouncyCastle.Crypto.Parameters.AeadParameters ($keyParam, 128, $nonce, $null)
+                    $cipher.Init($false, $parameters)
+
+
+                    $output = New-Object byte[] ($cipher.GetOutputSize($cipherTextAndTag.Length))
+                    $bytesProcessed = $cipher.ProcessBytes($cipherTextAndTag, 0, $cipherTextAndTag.Length, $output, 0)
+                    $bytesProcessed += $cipher.DoFinal($output, $bytesProcessed)
+
+                    return ([System.Text.Encoding]::UTF8.GetString($output, 0, $bytesProcessed)).TrimEnd([char]0)
+                } catch {
+                    Write-Log -Message ("Chrome AES-GCM decryption failed; falling back to DPAPI: {0}" -f $_) -Level 'WARN'
+                }
             }
-
-            $nonce = New-Object byte[] $nonceLength
-            [Array]::Copy($Data, 3, $nonce, 0, $nonceLength)
-
-            $cipherTextLength = $Data.Length - 3 - $nonceLength
-            $cipherTextAndTag = New-Object byte[] $cipherTextLength
-            [Array]::Copy($Data, 3 + $nonceLength, $cipherTextAndTag, 0, $cipherTextLength)
-
-            $engine = New-Object Org.BouncyCastle.Crypto.Engines.AesEngine
-            $cipher = New-Object Org.BouncyCastle.Crypto.Modes.GcmBlockCipher ($engine)
-            $keyParam = [Org.BouncyCastle.Crypto.Parameters.KeyParameter]::new($Key)
-            $parameters = New-Object Org.BouncyCastle.Crypto.Parameters.AeadParameters ($keyParam, 128, $nonce, $null)
-            $cipher.Init($false, $parameters)
-
-            $output = New-Object byte[] ($cipher.GetOutputSize($cipherTextAndTag.Length))
-            $bytesProcessed = $cipher.ProcessBytes($cipherTextAndTag, 0, $cipherTextAndTag.Length, $output, 0)
-            $bytesProcessed += $cipher.DoFinal($output, $bytesProcessed)
-
-            return ([System.Text.Encoding]::UTF8.GetString($output, 0, $bytesProcessed)).TrimEnd([char]0)
         }
 
         if (-not (Ensure-ProtectedDataSupport)) {

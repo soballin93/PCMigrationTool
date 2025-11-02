@@ -11,7 +11,8 @@
       "Bash(git add:*)",
       "Bash(.githooks/pre-commit:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"$content = Get-Content ''PCSwapTool.ps1'' -Raw; $errors = $null; [void][System.Management.Automation.PSParser]::Tokenize($content, [ref]$errors); if ($errors) { $errors | Format-List } else { Write-Host ''No syntax errors found!'' -ForegroundColor Green }\")"
     ],
     "deny": [],
     "ask": []

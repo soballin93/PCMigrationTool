@@ -1892,27 +1892,7 @@ $btnStartExport.Add_Click({
     $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Orange
 })
 
-$btnWallpaper = New-Object System.Windows.Forms.Button; $btnWallpaper.Text = "Copy Current Wallpaper"; $btnWallpaper.SetBounds(10,165,180,30); $btnWallpaper.Add_Click({ Copy-Wallpaper | Out-Null })
-$btnSignatures = New-Object System.Windows.Forms.Button; $btnSignatures.Text = "Copy Outlook Signatures"; $btnSignatures.SetBounds(200,165,200,30); $btnSignatures.Add_Click({ Copy-OutlookSignatures | Out-Null })
-$btnDeregEdit = New-Object System.Windows.Forms.Button; $btnDeregEdit.Text = "Edit Deregistration List"; $btnDeregEdit.SetBounds(410,165,170,30); $btnDeregEdit.Add_Click({
-    $list = Ensure-DeregList
-    $path = Get-DeregListPath
-    if ($path) {
-        if (-not (Test-Path $path)) { Save-Json -Object $list -Path $path }
-        Start-Process notepad.exe $path | Out-Null
-    } else {
-        [System.Windows.Forms.MessageBox]::Show('Repository not initialized yet. Start a gather first.','Repository Pending','OK','Warning') | Out-Null
-    }
-})
-$btnStartGather = New-Object System.Windows.Forms.Button; $btnStartGather.Text = "Start Gather"; $btnStartGather.SetBounds(10,205,150,32)
-$btnOpenRepo = New-Object System.Windows.Forms.Button; $btnOpenRepo.Text = "Open Repo Folder"; $btnOpenRepo.SetBounds(170,205,170,32); $btnOpenRepo.Add_Click({
-    $repoRoot = Get-SwapInfoRoot
-    if ($repoRoot -and (Test-Path $repoRoot)) {
-        Start-Process explorer.exe $repoRoot | Out-Null
-    } else {
-        [System.Windows.Forms.MessageBox]::Show('Repository folder not available yet. Start a gather to create it.','Repository Pending','OK','Warning') | Out-Null
-    }
-})
+$btnStartGather = New-Object System.Windows.Forms.Button; $btnStartGather.Text = "Start Gather"; $btnStartGather.SetBounds(10,165,150,32)
 $initialRepo = Get-SwapInfoRoot
 $lblInfo = New-Object System.Windows.Forms.Label; $lblInfo.Text = "All collected files + manifest/report/logs are written to: " + ($(if ($initialRepo) { $initialRepo } else { 'Not created yet' })); $lblInfo.SetBounds(10,240,820,20)
 $lvGather = New-Object System.Windows.Forms.TextBox; $lvGather.Multiline = $true; $lvGather.ReadOnly = $true; $lvGather.ScrollBars = 'Vertical'; $lvGather.SetBounds(10,270,820,235)
@@ -1927,11 +1907,7 @@ $tabGather.Controls.AddRange(@(
     $lblBrowsers,
     $btnStartExport,
     $lblBrowserStatus,
-    $btnWallpaper,
-    $btnSignatures,
-    $btnDeregEdit,
     $btnStartGather,
-    $btnOpenRepo,
     $lblInfo,
     $lvGather
 ))

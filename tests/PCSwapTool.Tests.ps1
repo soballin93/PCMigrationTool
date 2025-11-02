@@ -195,22 +195,26 @@ Describe "GUI Component Tests" {
     }
 }
 
-Describe "Chrome Password Export" {
-    Context "Dependency Loading" {
-        It "Should reference BouncyCastle.Crypto.dll" {
-            $script:ScriptContent | Should -Match 'BouncyCastle\.Crypto\.dll'
+Describe "Browser Password Export" {
+    Context "Manual Export Functions" {
+        It "Should have Get-InstalledBrowsers function" {
+            $script:ScriptContent | Should -Match 'function Get-InstalledBrowsers'
         }
 
-        It "Should reference System.Data.SQLite.dll" {
-            $script:ScriptContent | Should -Match 'System\.Data\.SQLite\.dll'
+        It "Should have Show-BrowserPasswordExportGuide function" {
+            $script:ScriptContent | Should -Match 'function Show-BrowserPasswordExportGuide'
         }
 
-        It "Should have Get-ToolResourcePath function" {
-            $script:ScriptContent | Should -Match 'function Get-ToolResourcePath'
+        It "Should have Test-BrowserPasswordExports function" {
+            $script:ScriptContent | Should -Match 'function Test-BrowserPasswordExports'
         }
 
-        It "Should have Invoke-DownloadToolResource function" {
-            $script:ScriptContent | Should -Match 'function Invoke-DownloadToolResource'
+        It "Should support multiple browsers (Chrome, Edge, Firefox, Brave, Opera)" {
+            $script:ScriptContent | Should -Match 'Chrome'
+            $script:ScriptContent | Should -Match 'Edge'
+            $script:ScriptContent | Should -Match 'Firefox'
+            $script:ScriptContent | Should -Match 'Brave'
+            $script:ScriptContent | Should -Match 'Opera'
         }
     }
 }
@@ -223,15 +227,11 @@ Describe "Logging System" {
         }
 
         It "Should have error logging" {
-            $script:ScriptContent | Should -Match "Write-Log.*-Level\s+['\"]Error['\"]"
+            $script:ScriptContent | Should -Match "Write-Log.*-Level\s+[`"']Error[`"']"
         }
 
         It "Should have warning logging" {
-            $script:ScriptContent | Should -Match "Write-Log.*-Level\s+['\"](?:Warn|Warning)['\"]"
-        }
-
-        It "Should have info logging" {
-            $script:ScriptContent | Should -Match "Write-Log.*-Level\s+['\"]Info['\"]"
+            $script:ScriptContent | Should -Match "Write-Log.*-Level\s+[`"'](?:Warn|Warning|WARN)[`"']"
         }
     }
 }

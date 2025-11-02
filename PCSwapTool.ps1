@@ -42,43 +42,6 @@
       - Fix: Preserve the script path when registering resume actions so restore
         tasks schedule correctly even when $PSCommandPath is blank.
       - Date: 2025-09-29
-
-    0.5.27
-      - Improvement: Launch Chrome automatically to chrome://settings/passwords when guiding
-        technicians through the manual password export.
-      - Date: 2025-09-28
-
-    0.5.26
-      - Change: Removed automated Chrome password export and restored technician-guided instructions.
-      - Date: 2025-09-27
-
-    0.5.25
-      - Fix: Fall back to DPAPI when Chrome AES-GCM secrets fail authentication
-        so legacy DPAPI entries with "vXX" prefixes still decrypt correctly.
-      - Date: 2025-09-27
-
-    0.5.24
-      - Fix: Instantiate the Chrome AES key parameter without splatting individual
-        bytes so BouncyCastle accepts 32-byte keys on newer builds.
-      - Date: 2025-09-27
-    0.5.23
-      - Fix: Treat Chrome secrets with any "vXX" prefix as AES-GCM so newer Chrome
-        builds decrypt correctly instead of falling back to DPAPI and failing.
-      - Fix: Retry DPAPI secrets with the LocalMachine scope when CurrentUser
-        decryption is unavailable, covering service and system profiles.
-      - Date: 2025-09-27
-    0.5.22
-      - Change: Skip creating the Chrome password CSV when no credentials can be
-        decrypted and remove any stale export so manifests remain accurate.
-      - Improvement: Surface the "no credentials" outcome without treating it as
-        a successful export, preventing empty files from appearing in the
-        repository.
-      - Date: 2025-09-27
-    0.5.21
-      - Fix: Initialize the ProtectedDataReady flag before first use so Chrome password
-        export no longer fails under StrictMode when the ProtectedData type is loaded
-        on demand.
-      - Date: 2025-09-27
     0.5.10
       - Feature: Read default PDF and browser ProgIds from the new UserChoiceLatest registry keys when available (for ".pdf" and HTTP associations) and fall back to legacy UserChoice keys. This prevents defaults from appearing as MS Edge when Chrome/Adobe are set.
       - Bumped version and changelog accordingly.
@@ -211,7 +174,7 @@
       - PowerShell 5.1, run as admin.
     Limitations (intentional):
       - Default apps cannot be set silently per-user; we record ProgIDs and open Settings.
-      - Chrome password export remains manual; the tool opens chrome://settings/passwords automatically.
+      - Browser password exports are manual; the tool detects browsers and opens them to their password export pages.
 
 #>
 
@@ -1424,7 +1387,7 @@ function Write-Report { param($Manifest,$CopySummary)
     $L += ""
     $L += "---- Summary ----"
     $L += "Include OneDrive: $($Manifest.IncludeOneDrive)"
-    $L += "Chrome passwords CSV present (manual export): $($Manifest.ChromeCsv)"
+    $L += "Chrome passwords CSV present (legacy): $($Manifest.ChromeCsv)"
     $L += "Wallpaper copied: $($Manifest.WallpaperCopied)"
     $L += "Outlook signatures: $($Manifest.SignaturesCopied)"
     $L += "Desktop screenshots captured: $($desktopScreenshotCount -gt 0)"
@@ -2078,10 +2041,7 @@ $btnStartGather.Add_Click({
     # Export wireless profiles to repository (WLAN profiles)
     if (Get-Command Export-WlanProfiles -ErrorAction SilentlyContinue) { $null = Export-WlanProfiles }
 
-    # 5) Remind technician to export Chrome passwords manually (repo exists now)
-    if (Get-Command Show-ChromePasswordExportGuide -ErrorAction SilentlyContinue) { $null = Show-ChromePasswordExportGuide }
-
-    # 5.5) If capturing Outlook credentials, prompt now (before manifest build) and store in global
+    # If capturing Outlook credentials, prompt now (before manifest build) and store in global
     if ($cbOutlookCred.Checked) {
         try {
             $script:OutlookSetupCred = Prompt-OutlookAccount

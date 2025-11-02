@@ -986,7 +986,7 @@ function Get-InstalledBrowsers {
             Name           = 'Brave'
             DisplayName    = 'Brave Browser'
             ExePath        = $bravePath
-            PasswordUrl    = 'chrome://password-manager/settings'
+            PasswordUrl    = 'brave://password-manager/settings'
             ExportFileName = 'Brave Passwords.csv'
         }
     }

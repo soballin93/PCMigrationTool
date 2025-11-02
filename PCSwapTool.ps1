@@ -1345,11 +1345,41 @@ function Restart-WindowsExplorer {
 }
 function Open-DefaultAppsGuidance {
     [System.Diagnostics.Process]::Start("ms-settings:defaultapps") | Out-Null
-    [System.Windows.Forms.MessageBox]::Show(
-"Windows blocks scripted per-user default-app changes.
-Captured defaults (manifest User.*ProgId) are shown in the report.
-Set PDF and Browser now for the current user.",
-"Default Apps Guidance",'OK','Information') | Out-Null
+
+    # Load manifest to show actual default programs
+    $manifest = $null
+    if ($tbMan.Text -and (Test-Path $tbMan.Text)) {
+        try {
+            $manifest = Load-Json -Path $tbMan.Text
+        } catch {
+            Write-Log -Message "Failed to load manifest for default apps display: $_" -Level 'WARN'
+        }
+    }
+
+    $messageText = "Windows blocks scripted per-user default-app changes.`n`n"
+
+    if ($manifest -and $manifest.User) {
+        $messageText += "Default programs from source machine:`n`n"
+
+        if ($manifest.User.PSObject.Properties['DefaultPdfProgId'] -and $manifest.User.DefaultPdfProgId) {
+            $messageText += "PDF Viewer: $($manifest.User.DefaultPdfProgId)`n"
+        } else {
+            $messageText += "PDF Viewer: (not captured)`n"
+        }
+
+        if ($manifest.User.PSObject.Properties['DefaultBrowserProgId'] -and $manifest.User.DefaultBrowserProgId) {
+            $messageText += "Browser: $($manifest.User.DefaultBrowserProgId)`n"
+        } else {
+            $messageText += "Browser: (not captured)`n"
+        }
+
+        $messageText += "`nPlease set these defaults now for the current user."
+    } else {
+        $messageText += "No manifest loaded - cannot display captured defaults.`n"
+        $messageText += "Set PDF and Browser now for the current user."
+    }
+
+    [System.Windows.Forms.MessageBox]::Show($messageText, "Default Apps Guidance", 'OK', 'Information') | Out-Null
 }
 function Apply-SystemDefaultAppsFromManifest { param($Manifest)
     try{

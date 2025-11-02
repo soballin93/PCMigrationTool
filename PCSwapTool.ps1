@@ -936,7 +936,7 @@ function Get-InstalledBrowsers {
             DisplayName    = 'Google Chrome'
             ExePath        = $chromePath
             PasswordUrl    = 'chrome://settings/passwords'
-            ExportFileName = 'Chrome_Passwords.csv'
+            ExportFileName = 'Chrome Passwords.csv'
         }
     }
 
@@ -953,7 +953,7 @@ function Get-InstalledBrowsers {
             DisplayName    = 'Microsoft Edge'
             ExePath        = $edgePath
             PasswordUrl    = 'edge://settings/passwords'
-            ExportFileName = 'Edge_Passwords.csv'
+            ExportFileName = 'Microsoft Edge Passwords.csv'
         }
     }
 
@@ -970,7 +970,7 @@ function Get-InstalledBrowsers {
             DisplayName    = 'Mozilla Firefox'
             ExePath        = $firefoxPath
             PasswordUrl    = 'about:logins'
-            ExportFileName = 'Firefox_Passwords.csv'
+            ExportFileName = 'passwords.csv'
         }
     }
 
@@ -987,7 +987,7 @@ function Get-InstalledBrowsers {
             DisplayName    = 'Brave Browser'
             ExePath        = $bravePath
             PasswordUrl    = 'chrome://settings/passwords'
-            ExportFileName = 'Brave_Passwords.csv'
+            ExportFileName = 'Brave Passwords.csv'
         }
     }
 
@@ -1006,7 +1006,7 @@ function Get-InstalledBrowsers {
             DisplayName    = 'Opera Browser'
             ExePath        = $operaPath
             PasswordUrl    = 'opera://settings/passwords'
-            ExportFileName = 'Opera_Passwords.csv'
+            ExportFileName = 'Opera Passwords.csv'
         }
     }
 

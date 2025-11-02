@@ -9,7 +9,9 @@
       "Bash(powershell.exe -NoProfile -Command \"Get-ChildItem ..\\PCSwapTool.ps1\")",
       "Bash(powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"Invoke-Pester ./tests -Output Detailed\")",
       "Bash(git add:*)",
-      "Bash(.githooks/pre-commit:*)"
+      "Bash(.githooks/pre-commit:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "ask": []

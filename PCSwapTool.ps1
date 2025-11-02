@@ -1863,7 +1863,7 @@ if ($PSBoundParameters.ContainsKey('CaptureOutlookCredentials')) { $cbOutlookCre
 $lblBrowsers = New-Object System.Windows.Forms.Label; $lblBrowsers.Text = "Browser Password Exports (Required):"; $lblBrowsers.SetBounds(10,105,300,20)
 $lblBrowserStatus = New-Object System.Windows.Forms.Label; $lblBrowserStatus.Text = "Detecting browsers..."; $lblBrowserStatus.SetBounds(10,130,810,25); $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Gray
 
-# Auto-detect browsers on form load and automatically open them for export
+# Auto-detect browsers on form load (don't open them yet - that happens on Start Gather)
 Write-Log -Message "Detecting installed browsers..."
 $script:DetectedBrowsers = Get-InstalledBrowsers
 
@@ -1873,14 +1873,9 @@ if ($script:DetectedBrowsers.Count -eq 0) {
     Write-Log -Message "No browsers detected on this system"
 } else {
     $browserNames = ($script:DetectedBrowsers | ForEach-Object { $_.DisplayName }) -join ', '
-    $lblBrowserStatus.Text = "Detected: $browserNames - Opening browsers for password export..."
+    $lblBrowserStatus.Text = "Detected: $browserNames - browsers will open when you click Start Gather"
     $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Blue
     Write-Log -Message "Detected $($script:DetectedBrowsers.Count) browser(s): $browserNames"
-
-    # Automatically open all browsers to their password export pages
-    Show-BrowserPasswordExportGuide -Browsers $script:DetectedBrowsers
-    $lblBrowserStatus.Text = "Browsers opened - export passwords and save to Browser_Exports folder, then click Start Gather"
-    $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Orange
 }
 
 $btnStartGather = New-Object System.Windows.Forms.Button; $btnStartGather.Text = "Start Gather"; $btnStartGather.SetBounds(10,165,150,32)
@@ -1920,6 +1915,26 @@ $btnStartGather.Add_Click({
 
     Ensure-AdminOrWarn
 
+    # Open browsers for password export if any detected and not already done
+    if ($script:DetectedBrowsers.Count -gt 0) {
+        Write-Log -Message "Opening browsers for password export..."
+        Show-BrowserPasswordExportGuide -Browsers $script:DetectedBrowsers
+        $lblBrowserStatus.Text = "Browsers opened - export passwords and save to Browser_Exports folder"
+        $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Orange
+
+        # Prompt technician to export passwords before continuing
+        $result = [System.Windows.Forms.MessageBox]::Show(
+            "Browser password export pages have been opened in your browsers.`n`nPlease export passwords from each browser to the Browser_Exports folder, then click OK to continue the gather process.",
+            "Export Browser Passwords",
+            'OKCancel',
+            'Information'
+        )
+        if ($result -eq 'Cancel') {
+            Write-Log -Message "Gather cancelled by technician during browser export step" -Level 'WARN'
+            return
+        }
+    }
+
     # Validate browser password exports before starting gather
     if ($script:DetectedBrowsers.Count -gt 0) {
         $exportResults = Test-BrowserPasswordExports -Browsers $script:DetectedBrowsers
@@ -1927,12 +1942,14 @@ $btnStartGather.Add_Click({
         if ($missingCount -gt 0) {
             $missingBrowsers = $exportResults.GetEnumerator() | Where-Object { $_.Value -eq $false } | ForEach-Object { $_.Key }
             $missingList = $missingBrowsers -join ', '
-            $message = "Browser password exports are required but incomplete.`n`nMissing exports for: $missingList`n`nPlease:`n1. Click 'Export Passwords'`n2. Export passwords for all detected browsers`n3. Click 'Validate Exports' to confirm`n4. Then start gather again"
+            $message = "Browser password exports are required but incomplete.`n`nMissing exports for: $missingList`n`nPlease export passwords from the browsers listed above, then click Start Gather again."
             [System.Windows.Forms.MessageBox]::Show($message, "Browser Exports Required", 'OK', 'Warning') | Out-Null
             Write-Log -Message "Gather blocked: Missing browser password exports for $missingList" -Level 'WARN'
             return
         }
         Write-Log -Message "All detected browser password exports validated - proceeding with gather"
+        $lblBrowserStatus.Text = "All browser password exports validated"
+        $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Green
     } else {
         Write-Log -Message "No browsers detected - skipping browser export validation"
     }

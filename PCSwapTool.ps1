@@ -2,7 +2,7 @@
 <# 
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.33 (2025-10-04)
+    Version: 0.6.0 (Production-Ready Edition)
 
 
 
@@ -232,7 +232,8 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.33'
+$ProgramVersion = '0.6.0'
+$ManifestSchemaVersion = '1.0'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -243,7 +244,7 @@ $StatePath      = $null
 $DeregListPath = $null
 $ChromeCsvName  = 'Chrome Passwords.csv'
 $WallpaperName  = 'TranscodedWallpaper'
-$ScriptFileName = 'PCSwapTool_v0.5.20.ps1'
+$ScriptFileName = 'PCSwapTool.ps1'
 
 $script:ToolRoot = try {
     $cmdPath = $MyInvocation.MyCommand.Path
@@ -615,6 +616,77 @@ function Write-Log {
     }
 }
 
+function Protect-String {
+    param([string]$PlainText)
+    try {
+        $encryptedBytes = [System.Security.Cryptography.ProtectedData]::Protect(
+            [System.Text.Encoding]::UTF8.GetBytes($PlainText),
+            $null,
+            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        return [Convert]::ToBase64String($encryptedBytes)
+    } catch {
+        Write-Log -Message "String protection failed: $_" -Level 'WARN'
+        return $PlainText
+    }
+}
+
+function Unprotect-String {
+    param([string]$EncryptedText)
+    try {
+        $encryptedBytes = [Convert]::FromBase64String($EncryptedText)
+        $decryptedBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+            $encryptedBytes,
+            $null,
+            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        return [System.Text.Encoding]::UTF8.GetString($decryptedBytes)
+    } catch {
+        Write-Log -Message "String decryption failed (may be plaintext): $_" -Level 'WARN'
+        return $EncryptedText
+    }
+}
+
+function Test-DiskSpace {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [long]$MinimumGB = 10
+    )
+    try {
+        if (-not (Test-Path $Path)) { return $false }
+        $drive = Get-PSDrive -Name ([IO.Path]::GetPathRoot($Path).TrimEnd('\')[0]) -PSProvider FileSystem -ErrorAction SilentlyContinue
+        if (-not $drive) { return $true }
+        $freeGB = $drive.Free / 1GB
+        if ($freeGB -lt $MinimumGB) {
+            Write-Log -Message "Insufficient disk space: ${freeGB}GB available, ${MinimumGB}GB required" -Level 'WARN'
+            return $false
+        }
+        return $true
+    } catch {
+        Write-Log -Message "Disk space check failed: $_" -Level 'WARN'
+        return $true
+    }
+}
+
+function Remove-UserResumeTask {
+    [CmdletBinding()]
+    param([string]$TaskName = 'PCSwap-Resume-User')
+    try {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($task) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop | Out-Null
+            Write-Log -Message "Unregistered scheduled task: $TaskName"
+            return $true
+        } else {
+            Write-Log -Message "Scheduled task not found: $TaskName" -Level 'WARN'
+            return $false
+        }
+    } catch {
+        Write-Log -Message "Failed to unregister scheduled task $TaskName : $_" -Level 'ERROR'
+        return $false
+    }
+}
 
 # ------------------- Utility -------------------
 function Test-Admin {
@@ -1052,6 +1124,7 @@ function Build-Manifest { param($General,$Computer,$User,$IncludeOneDrive)
         Write-Log -Message 'SwapInfoRoot not set while building manifest; repository checks skipped.' -Level 'WARN'
     }
     [PSCustomObject]@{
+        SchemaVersion="1.0"
         Mode="Gather"; General=$General; Computer=$Computer; User=$User; IncludeOneDrive=[bool]$IncludeOneDrive
         CollectedBy="$env:USERDOMAIN\$env:USERNAME"; CollectedAt=(Get-Date).ToString('s')
         ChromeCsv=$chromeCsvPresent
@@ -1153,13 +1226,14 @@ function Copy-UserProfile {
     $destRoot=$BaseDestinationPath; $dest=Join-Path $destRoot ("{0}_{1}" -f $hostName,$dateStr)
     try{ if(-not (Test-Path $destRoot)){ New-Item -ItemType Directory -Path $destRoot -Force|Out-Null }; New-Item -ItemType Directory -Path $dest -Force|Out-Null }catch{ Write-Log -Message "Create dest dirs failed: $_" -Level 'ERROR'; return "Failed to create $dest : $_" }
     $source=[Environment]::GetFolderPath("UserProfile")
-    $xd=@("AppData\Local\Temp","AppData\Local\Packages","AppData\Local\Microsoft","AppData\Local\CrashDumps"); if(-not $IncludeOneDrive){ $xd += "OneDrive" }
+    $xd=@("AppData\Local\Temp","AppData\Local\Packages","AppData\Local\Microsoft","AppData\Local\CrashDumps"); if(-not $IncludeOneDrive){ $xd += Get-ChildItem -Path $source -Directory -Filter "OneDrive*" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name }
     $xdArgs=@(); foreach($d in $xd){ $xdArgs += @("/XD",(Join-Path $source $d)) }
     $isUnc=$dest.StartsWith("\\"); $copyFlags=@("/COPY:DAT","/DCOPY:DAT"); if(-not $isUnc){ $copyFlags += "/SEC" }
     $args=@($source,$dest,"/E","/R:1","/W:1","/XJ") + $copyFlags + $xdArgs
     Write-Log -Message "Robocopy (gather) -> $dest Flags=$($copyFlags -join ' ')"
     $proc=Start-Process -FilePath robocopy.exe -ArgumentList $args -Wait -PassThru -NoNewWindow
     $code=$proc.ExitCode; Write-Log -Message "Robocopy exit code: $code"
+    if ($code -gt 1) { Write-Log -Message "Robocopy warning/error: exit code $code (0=success, 1=files copied ok, 2+=partial failure)" -Level 'WARN' }
     "Robocopy exit code: $code (0/1=OK). Source: $source Dest: $dest Flags: $($copyFlags -join ' ')"
 }
 
@@ -1383,7 +1457,8 @@ function Prompt-OutlookAccount {
     $form.CancelButton = $btnCancel
     if ($form.ShowDialog() -ne 'OK') { return $null }
     if ([string]::IsNullOrWhiteSpace($tbEmail.Text) -or [string]::IsNullOrWhiteSpace($tbPass.Text)) { return $null }
-    return [PSCustomObject]@{ Email = $tbEmail.Text.Trim(); Password = $tbPass.Text }
+    $encryptedPassword = Protect-String -PlainText $tbPass.Text
+    return [PSCustomObject]@{ Email = $tbEmail.Text.Trim(); Password = $encryptedPassword }
 }
 
 # Show the stored Outlook account credentials to the technician during restore.
@@ -1400,11 +1475,12 @@ function Show-OutlookAccountForRestore { param($Cred)
     } catch {
         Write-Log -Message "Failed to launch Outlook: $_" -Level 'WARN'
     }
+    $displayPassword = Unprotect-String -EncryptedText $Cred.Password
     [System.Windows.Forms.MessageBox]::Show(
 "Use the following credentials to add the Outlook account on this machine.
 
 Email: $($Cred.Email)
-Password: $($Cred.Password)
+Password: $displayPassword
 
 Open Outlook and go to File -> Add Account, then enter the above credentials when prompted.  After the account is added, you may delete these credentials from the manifest or change the password for security.",
 "Outlook Account Setup", 'OK','Information') | Out-Null
@@ -1476,7 +1552,7 @@ function Copy-ProfileToUser { param([string]$SourceFolder,[string]$TargetUserNam
     if(-not (Test-Path $SourceFolder)){ Write-Log -Message "Source folder missing: $SourceFolder" -Level 'ERROR'; return "Source not found: $SourceFolder" }
     $targetProfile=Join-Path 'C:\Users' $TargetUserName
     if(-not (Test-Path $targetProfile)){ New-Item -ItemType Directory -Path $targetProfile -Force | Out-Null }
-    $xd=@("AppData\Local\Temp","AppData\Local\Packages","AppData\Local\Microsoft\Windows\INetCache","AppData\Local\CrashDumps"); if(-not $IncludeOneDrive){ $xd += "OneDrive" }
+    $xd=@("AppData\Local\Temp","AppData\Local\Packages","AppData\Local\Microsoft\Windows\INetCache","AppData\Local\CrashDumps"); if(-not $IncludeOneDrive){ $xd += Get-ChildItem -Path $SourceFolder -Directory -Filter "OneDrive*" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name }
     $xdArgs=@(); foreach($d in $xd){ $xdArgs += @("/XD",(Join-Path $SourceFolder $d)) }
     $isUnc=$SourceFolder.StartsWith("\\"); $copyFlags=@("/COPY:DAT","/DCOPY:DAT"); if(-not $isUnc){ $copyFlags += "/SEC" }
     $args=@($SourceFolder,$targetProfile,"/E","/R:1","/W:1","/XJ") + $copyFlags + $xdArgs
@@ -1484,6 +1560,7 @@ function Copy-ProfileToUser { param([string]$SourceFolder,[string]$TargetUserNam
     $proc=Start-Process -FilePath robocopy.exe -ArgumentList $args -Wait -PassThru -NoNewWindow
     $code=$proc.ExitCode
     Write-Log -Message "Robocopy restore exit code: $code"
+    if ($code -gt 1) { Write-Log -Message "Robocopy warning/error: exit code $code (0=success, 1=files copied ok, 2+=partial failure)" -Level 'WARN' }
     return "Robocopy restore exit code: $code (0/1=OK)."
 }
 
@@ -1582,6 +1659,10 @@ $btnStartGather.Add_Click({
     }
     $repo = Ensure-Repository -BasePath $destBase -OpenFolder:$false
     if (-not $repo) { return }
+    if (-not (Test-DiskSpace -Path $destBase -MinimumGB 10)) {
+        [System.Windows.Forms.MessageBox]::Show("Insufficient disk space. At least 10GB required.","Disk Space Error",'OK','Warning') | Out-Null
+        return
+    }
 
     Ensure-AdminOrWarn
     Write-Log -Message "=== GATHER START ==="
@@ -1730,6 +1811,10 @@ $btnStartRestore.Add_Click({
     if (-not (Test-Path $tbMan.Text)) { [System.Windows.Forms.MessageBox]::Show("Please select a valid manifest.json.","Missing Manifest",'OK','Warning') | Out-Null; return }
     $manifest = Load-Json -Path $tbMan.Text
     if (-not $manifest) { [System.Windows.Forms.MessageBox]::Show("Manifest could not be parsed.","Manifest Error",'OK','Error') | Out-Null; return }
+    $schemaVersion = $manifest.PSObject.Properties['SchemaVersion']
+    if ($schemaVersion -and $schemaVersion.Value -ne $ManifestSchemaVersion) {
+        Write-Log -Message "Warning: Manifest schema version mismatch. Expected $ManifestSchemaVersion, got $($schemaVersion.Value)" -Level 'WARN'
+    }
 
     # Set repository root based on the selected manifest so that state.json and other repo
     # artifacts are written/read from the correct location during restore.
@@ -1946,6 +2031,7 @@ if ($ResumeUser) {
         }
     }
 
+    Remove-UserResumeTask -TaskName 'PCSwap-Resume-User' | Out-Null
     Write-Log -Message "=== USER RESUME END ==="
     exit 0
 }

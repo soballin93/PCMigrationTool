@@ -991,23 +991,21 @@ function Get-InstalledBrowsers {
         }
     }
 
-    # Opera (uses launcher.exe as the main executable)
-    $operaPath = Get-BrowserExecutablePath -BrowserName 'Opera' -ExecutableName 'launcher.exe' -CommonPaths @(
-        'Opera\launcher.exe',
-        'Programs\Opera\launcher.exe'
+    # Opera
+    $operaPath = Get-BrowserExecutablePath -BrowserName 'Opera' -ExecutableName 'opera.exe' -CommonPaths @(
+        'Opera\opera.exe',
+        'Programs\Opera\opera.exe'
     ) -RegistryPaths @(
         'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\opera.exe',
         'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\opera.exe',
-        'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\launcher.exe',
-        'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\launcher.exe',
-        'HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\launcher.exe'
+        'HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\opera.exe'
     )
     if ($operaPath) {
         $browsers += [PSCustomObject]@{
             Name           = 'Opera'
             DisplayName    = 'Opera Browser'
             ExePath        = $operaPath
-            PasswordUrl    = 'opera://settings/passwords'
+            PasswordUrl    = 'opera://password-manager/settings'
             ExportFileName = 'Opera Passwords.csv'
         }
     }

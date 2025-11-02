@@ -1938,7 +1938,8 @@ $btnStartGather.Add_Click({
     # Validate browser password exports before starting gather
     if ($script:DetectedBrowsers.Count -gt 0) {
         $exportResults = Test-BrowserPasswordExports -Browsers $script:DetectedBrowsers
-        $missingCount = ($exportResults.Values | Where-Object { $_ -eq $false }).Count
+        $missingExports = @($exportResults.Values | Where-Object { $_ -eq $false })
+        $missingCount = $missingExports.Count
         if ($missingCount -gt 0) {
             $missingBrowsers = $exportResults.GetEnumerator() | Where-Object { $_.Value -eq $false } | ForEach-Object { $_.Key }
             $missingList = $missingBrowsers -join ', '
@@ -2038,7 +2039,8 @@ $btnStartGather.Add_Click({
     $browserReminder = ""
     if ($script:DetectedBrowsers.Count -gt 0) {
         $exportResults = Test-BrowserPasswordExports -Browsers $script:DetectedBrowsers
-        $missing = ($exportResults.Values | Where-Object { $_ -eq $false }).Count
+        $missingExports = @($exportResults.Values | Where-Object { $_ -eq $false })
+        $missing = $missingExports.Count
         if ($missing -gt 0) {
             # This should never happen since gather is blocked if exports are incomplete
             $missingBrowsers = $exportResults.GetEnumerator() | Where-Object { $_.Value -eq $false } | ForEach-Object { $_.Key }

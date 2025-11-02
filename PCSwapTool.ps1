@@ -935,7 +935,7 @@ function Get-InstalledBrowsers {
             Name           = 'Chrome'
             DisplayName    = 'Google Chrome'
             ExePath        = $chromePath
-            PasswordUrl    = 'chrome://settings/passwords'
+            PasswordUrl    = 'chrome://password-manager/settings'
             ExportFileName = 'Chrome Passwords.csv'
         }
     }
@@ -952,7 +952,7 @@ function Get-InstalledBrowsers {
             Name           = 'Edge'
             DisplayName    = 'Microsoft Edge'
             ExePath        = $edgePath
-            PasswordUrl    = 'edge://settings/passwords'
+            PasswordUrl    = 'edge://settings/autofill/passwords'
             ExportFileName = 'Microsoft Edge Passwords.csv'
         }
     }
@@ -986,19 +986,21 @@ function Get-InstalledBrowsers {
             Name           = 'Brave'
             DisplayName    = 'Brave Browser'
             ExePath        = $bravePath
-            PasswordUrl    = 'chrome://settings/passwords'
+            PasswordUrl    = 'chrome://password-manager/settings'
             ExportFileName = 'Brave Passwords.csv'
         }
     }
 
-    # Opera
-    $operaPath = Get-BrowserExecutablePath -BrowserName 'Opera' -ExecutableName 'opera.exe' -CommonPaths @(
-        'Opera\launcher.exe'
+    # Opera (uses launcher.exe as the main executable)
+    $operaPath = Get-BrowserExecutablePath -BrowserName 'Opera' -ExecutableName 'launcher.exe' -CommonPaths @(
+        'Opera\launcher.exe',
+        'Programs\Opera\launcher.exe'
     ) -RegistryPaths @(
         'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\opera.exe',
         'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\opera.exe',
         'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\launcher.exe',
-        'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\launcher.exe'
+        'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\launcher.exe',
+        'HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\launcher.exe'
     )
     if ($operaPath) {
         $browsers += [PSCustomObject]@{

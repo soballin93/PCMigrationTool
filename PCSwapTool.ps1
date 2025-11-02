@@ -1861,63 +1861,35 @@ if ($PSBoundParameters.ContainsKey('CaptureOutlookCredentials')) { $cbOutlookCre
 
 # Browser Password Export Section
 $lblBrowsers = New-Object System.Windows.Forms.Label; $lblBrowsers.Text = "Browser Password Exports (Required):"; $lblBrowsers.SetBounds(10,105,300,20)
-$btnDetectBrowsers = New-Object System.Windows.Forms.Button; $btnDetectBrowsers.Text = "Detect Browsers"; $btnDetectBrowsers.SetBounds(10,130,120,25)
-$btnExportBrowsers = New-Object System.Windows.Forms.Button; $btnExportBrowsers.Text = "Export Passwords"; $btnExportBrowsers.SetBounds(140,130,120,25); $btnExportBrowsers.Enabled = $false
-$btnValidateExports = New-Object System.Windows.Forms.Button; $btnValidateExports.Text = "Validate Exports"; $btnValidateExports.SetBounds(270,130,120,25); $btnValidateExports.Enabled = $false
-$lblBrowserStatus = New-Object System.Windows.Forms.Label; $lblBrowserStatus.Text = "Click 'Detect Browsers' to scan for installed browsers"; $lblBrowserStatus.SetBounds(400,130,420,25); $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Gray
+$btnStartExport = New-Object System.Windows.Forms.Button; $btnStartExport.Text = "Start Export"; $btnStartExport.SetBounds(10,130,120,25); $btnStartExport.Enabled = $false
+$lblBrowserStatus = New-Object System.Windows.Forms.Label; $lblBrowserStatus.Text = "Detecting browsers..."; $lblBrowserStatus.SetBounds(140,130,680,25); $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Gray
 
-# Store detected browsers in script scope for button handlers
-$script:DetectedBrowsers = @()
+# Auto-detect browsers on form load
+Write-Log -Message "Detecting installed browsers..."
+$script:DetectedBrowsers = Get-InstalledBrowsers
 
-$btnDetectBrowsers.Add_Click({
-    Write-Log -Message "Detecting installed browsers..."
-    $script:DetectedBrowsers = Get-InstalledBrowsers
+if ($script:DetectedBrowsers.Count -eq 0) {
+    $lblBrowserStatus.Text = "No browsers detected - browser password export not required"
+    $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Gray
+    $btnStartExport.Enabled = $false
+    Write-Log -Message "No browsers detected on this system"
+} else {
+    $browserNames = ($script:DetectedBrowsers | ForEach-Object { $_.DisplayName }) -join ', '
+    $lblBrowserStatus.Text = "Detected: $browserNames - Click 'Start Export' to open browsers"
+    $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Blue
+    $btnStartExport.Enabled = $true
+    Write-Log -Message "Detected $($script:DetectedBrowsers.Count) browser(s): $browserNames"
+}
 
+# Start Export button - opens all detected browsers to their password export pages
+$btnStartExport.Add_Click({
     if ($script:DetectedBrowsers.Count -eq 0) {
-        $lblBrowserStatus.Text = "No browsers detected"
-        $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Gray
-        $btnExportBrowsers.Enabled = $false
-        $btnValidateExports.Enabled = $false
-        Write-Log -Message "No browsers detected on this system"
-    } else {
-        $browserNames = ($script:DetectedBrowsers | ForEach-Object { $_.DisplayName }) -join ', '
-        $lblBrowserStatus.Text = "Detected: $browserNames"
-        $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Blue
-        $btnExportBrowsers.Enabled = $true
-        $btnValidateExports.Enabled = $true
-        Write-Log -Message "Detected $($script:DetectedBrowsers.Count) browser(s): $browserNames"
-    }
-})
-
-$btnExportBrowsers.Add_Click({
-    if ($script:DetectedBrowsers.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("No browsers detected. Click 'Detect Browsers' first.","No Browsers",'OK','Warning') | Out-Null
+        [System.Windows.Forms.MessageBox]::Show("No browsers detected.","No Browsers",'OK','Warning') | Out-Null
         return
     }
     Show-BrowserPasswordExportGuide -Browsers $script:DetectedBrowsers
-})
-
-$btnValidateExports.Add_Click({
-    if ($script:DetectedBrowsers.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("No browsers detected. Click 'Detect Browsers' first.","No Browsers",'OK','Warning') | Out-Null
-        return
-    }
-
-    $results = Test-BrowserPasswordExports -Browsers $script:DetectedBrowsers
-    $found = ($results.Values | Where-Object { $_ -eq $true }).Count
-    $missing = $script:DetectedBrowsers.Count - $found
-
-    if ($missing -eq 0) {
-        $lblBrowserStatus.Text = "All exports validated ($found/$($script:DetectedBrowsers.Count))"
-        $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Green
-        [System.Windows.Forms.MessageBox]::Show("All browser password exports found!`n`nValidated: $found/$($script:DetectedBrowsers.Count)","Validation Success",'OK','Information') | Out-Null
-    } else {
-        $lblBrowserStatus.Text = "Missing exports: $missing/$($script:DetectedBrowsers.Count)"
-        $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Red
-        $missingBrowsers = $results.GetEnumerator() | Where-Object { $_.Value -eq $false } | ForEach-Object { $_.Key }
-        $missingList = $missingBrowsers -join ', '
-        [System.Windows.Forms.MessageBox]::Show("Missing password exports for:`n`n$missingList`n`nClick 'Export Passwords' to export missing browsers.","Validation Failed",'OK','Warning') | Out-Null
-    }
+    $lblBrowserStatus.Text = "Browsers opened - export passwords and save to Browser_Exports folder"
+    $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Orange
 })
 
 $btnWallpaper = New-Object System.Windows.Forms.Button; $btnWallpaper.Text = "Copy Current Wallpaper"; $btnWallpaper.SetBounds(10,165,180,30); $btnWallpaper.Add_Click({ Copy-Wallpaper | Out-Null })
@@ -1953,9 +1925,7 @@ $tabGather.Controls.AddRange(@(
     $cbSkipCopy,
     $cbOutlookCred,
     $lblBrowsers,
-    $btnDetectBrowsers,
-    $btnExportBrowsers,
-    $btnValidateExports,
+    $btnStartExport,
     $lblBrowserStatus,
     $btnWallpaper,
     $btnSignatures,

@@ -192,10 +192,6 @@ Describe "GUI Component Tests" {
         It "Should have Restore button" {
             $script:ScriptContent | Should -Match '\$btnStartRestore'
         }
-
-        It "Should have Start Export button for browser passwords" {
-            $script:ScriptContent | Should -Match '\$btnStartExport'
-        }
     }
 }
 

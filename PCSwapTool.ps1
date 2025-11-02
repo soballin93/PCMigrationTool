@@ -1861,36 +1861,27 @@ if ($PSBoundParameters.ContainsKey('CaptureOutlookCredentials')) { $cbOutlookCre
 
 # Browser Password Export Section
 $lblBrowsers = New-Object System.Windows.Forms.Label; $lblBrowsers.Text = "Browser Password Exports (Required):"; $lblBrowsers.SetBounds(10,105,300,20)
-$btnStartExport = New-Object System.Windows.Forms.Button; $btnStartExport.Text = "Start Export"; $btnStartExport.SetBounds(10,130,120,25); $btnStartExport.Enabled = $false
-$lblBrowserStatus = New-Object System.Windows.Forms.Label; $lblBrowserStatus.Text = "Detecting browsers..."; $lblBrowserStatus.SetBounds(140,130,680,25); $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Gray
+$lblBrowserStatus = New-Object System.Windows.Forms.Label; $lblBrowserStatus.Text = "Detecting browsers..."; $lblBrowserStatus.SetBounds(10,130,810,25); $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Gray
 
-# Auto-detect browsers on form load
+# Auto-detect browsers on form load and automatically open them for export
 Write-Log -Message "Detecting installed browsers..."
 $script:DetectedBrowsers = Get-InstalledBrowsers
 
 if ($script:DetectedBrowsers.Count -eq 0) {
     $lblBrowserStatus.Text = "No browsers detected - browser password export not required"
     $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Gray
-    $btnStartExport.Enabled = $false
     Write-Log -Message "No browsers detected on this system"
 } else {
     $browserNames = ($script:DetectedBrowsers | ForEach-Object { $_.DisplayName }) -join ', '
-    $lblBrowserStatus.Text = "Detected: $browserNames - Click 'Start Export' to open browsers"
+    $lblBrowserStatus.Text = "Detected: $browserNames - Opening browsers for password export..."
     $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Blue
-    $btnStartExport.Enabled = $true
     Write-Log -Message "Detected $($script:DetectedBrowsers.Count) browser(s): $browserNames"
-}
 
-# Start Export button - opens all detected browsers to their password export pages
-$btnStartExport.Add_Click({
-    if ($script:DetectedBrowsers.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("No browsers detected.","No Browsers",'OK','Warning') | Out-Null
-        return
-    }
+    # Automatically open all browsers to their password export pages
     Show-BrowserPasswordExportGuide -Browsers $script:DetectedBrowsers
-    $lblBrowserStatus.Text = "Browsers opened - export passwords and save to Browser_Exports folder"
+    $lblBrowserStatus.Text = "Browsers opened - export passwords and save to Browser_Exports folder, then click Start Gather"
     $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Orange
-})
+}
 
 $btnStartGather = New-Object System.Windows.Forms.Button; $btnStartGather.Text = "Start Gather"; $btnStartGather.SetBounds(10,165,150,32)
 $initialRepo = Get-SwapInfoRoot
@@ -1905,7 +1896,6 @@ $tabGather.Controls.AddRange(@(
     $cbSkipCopy,
     $cbOutlookCred,
     $lblBrowsers,
-    $btnStartExport,
     $lblBrowserStatus,
     $btnStartGather,
     $lblInfo,

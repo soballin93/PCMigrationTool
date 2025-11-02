@@ -1897,7 +1897,7 @@ if ($PSBoundParameters.ContainsKey('SkipProfileCopy')) { $cbSkipCopy.Checked = [
 if ($PSBoundParameters.ContainsKey('CaptureOutlookCredentials')) { $cbOutlookCred.Checked = [bool]$CaptureOutlookCredentials }
 
 # Browser Password Export Section
-$lblBrowsers = New-Object System.Windows.Forms.Label; $lblBrowsers.Text = "Browser Password Exports (Optional):"; $lblBrowsers.SetBounds(10,105,300,20)
+$lblBrowsers = New-Object System.Windows.Forms.Label; $lblBrowsers.Text = "Browser Password Exports (Required):"; $lblBrowsers.SetBounds(10,105,300,20)
 $btnDetectBrowsers = New-Object System.Windows.Forms.Button; $btnDetectBrowsers.Text = "Detect Browsers"; $btnDetectBrowsers.SetBounds(10,130,120,25)
 $btnExportBrowsers = New-Object System.Windows.Forms.Button; $btnExportBrowsers.Text = "Export Passwords"; $btnExportBrowsers.SetBounds(140,130,120,25); $btnExportBrowsers.Enabled = $false
 $btnValidateExports = New-Object System.Windows.Forms.Button; $btnValidateExports.Text = "Validate Exports"; $btnValidateExports.SetBounds(270,130,120,25); $btnValidateExports.Enabled = $false
@@ -2020,6 +2020,24 @@ $btnStartGather.Add_Click({
     }
 
     Ensure-AdminOrWarn
+
+    # Validate browser password exports before starting gather
+    if ($script:DetectedBrowsers.Count -gt 0) {
+        $exportResults = Test-BrowserPasswordExports -Browsers $script:DetectedBrowsers
+        $missingCount = ($exportResults.Values | Where-Object { $_ -eq $false }).Count
+        if ($missingCount -gt 0) {
+            $missingBrowsers = $exportResults.GetEnumerator() | Where-Object { $_.Value -eq $false } | ForEach-Object { $_.Key }
+            $missingList = $missingBrowsers -join ', '
+            $message = "Browser password exports are required but incomplete.`n`nMissing exports for: $missingList`n`nPlease:`n1. Click 'Export Passwords'`n2. Export passwords for all detected browsers`n3. Click 'Validate Exports' to confirm`n4. Then start gather again"
+            [System.Windows.Forms.MessageBox]::Show($message, "Browser Exports Required", 'OK', 'Warning') | Out-Null
+            Write-Log -Message "Gather blocked: Missing browser password exports for $missingList" -Level 'WARN'
+            return
+        }
+        Write-Log -Message "All detected browser password exports validated - proceeding with gather"
+    } else {
+        Write-Log -Message "No browsers detected - skipping browser export validation"
+    }
+
     Write-Log -Message "=== GATHER START ==="
 
     # 1) Select & validate destination base path first
@@ -2103,16 +2121,17 @@ $btnStartGather.Add_Click({
         Start-Process explorer.exe $activeRepoRoot | Out-Null
     }
 
-    # Check for missing browser password exports and remind technician
+    # Verify browser password exports are complete (should always pass since gather is blocked otherwise)
     $browserReminder = ""
     if ($script:DetectedBrowsers.Count -gt 0) {
         $exportResults = Test-BrowserPasswordExports -Browsers $script:DetectedBrowsers
         $missing = ($exportResults.Values | Where-Object { $_ -eq $false }).Count
         if ($missing -gt 0) {
+            # This should never happen since gather is blocked if exports are incomplete
             $missingBrowsers = $exportResults.GetEnumerator() | Where-Object { $_.Value -eq $false } | ForEach-Object { $_.Key }
             $missingList = $missingBrowsers -join ', '
-            $browserReminder = "`n`nWARNING: Missing browser password exports for:`n$missingList`n`nThese browsers were detected but passwords were not exported.`nYou can export them now or skip this step."
-            Write-Log -Message "Gather completed with MISSING browser exports: $missingList" -Level 'WARN'
+            $browserReminder = "`n`nUNEXPECTED: Missing browser password exports detected:`n$missingList`n`nThis should not have occurred as gather is blocked if exports are incomplete."
+            Write-Log -Message "UNEXPECTED: Gather completed with missing browser exports: $missingList (gather validation may have been bypassed)" -Level 'ERROR'
         } else {
             Write-Log -Message "All detected browser password exports validated successfully"
         }

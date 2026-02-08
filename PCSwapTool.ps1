@@ -1,8 +1,8 @@
 
-<# 
+<#
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.6.0 (Production-Ready Edition)
+    Version: 0.5.34
 
 
 
@@ -13,6 +13,14 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.34
+      - Fix: Domain-joined computer support. Added target domain username field to
+        Restore tab UI, stored TargetDomainUser in state.json, and registered user-context
+        resume task for domain users (not just local users). User resume phase now reads
+        target user from state instead of always using $env:USERNAME. Profile path
+        validation added with helpful warnings for domain scenarios. This fixes critical
+        issue where profile restoration never ran for domain-joined machines.
+      - Date: 2026-02-07
     0.5.33
       - Restore: Replace the automatic reboot with a technician prompt that reboots the
         workstation when they confirm, keeping the workflow in sync with hostname/domain
@@ -195,7 +203,7 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.6.0'
+$ProgramVersion = '0.5.34'
 $ManifestSchemaVersion = '1.0'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
@@ -1804,7 +1812,18 @@ function Register-UserResumeTaskEx {
 function Copy-ProfileToUser { param([string]$SourceFolder,[string]$TargetUserName,[bool]$IncludeOneDrive)
     if(-not (Test-Path $SourceFolder)){ Write-Log -Message "Source folder missing: $SourceFolder" -Level 'ERROR'; return "Source not found: $SourceFolder" }
     $targetProfile=Join-Path 'C:\Users' $TargetUserName
-    if(-not (Test-Path $targetProfile)){ New-Item -ItemType Directory -Path $targetProfile -Force | Out-Null }
+    if(-not (Test-Path $targetProfile)){
+        Write-Log -Message "Target profile path does not exist: $targetProfile. Creating directory. (Domain users: ensure user has logged in at least once.)" -Level 'WARN'
+        try {
+            New-Item -ItemType Directory -Path $targetProfile -Force | Out-Null
+            Write-Log -Message "Created target profile directory: $targetProfile"
+        } catch {
+            Write-Log -Message "Failed to create target profile directory $targetProfile : $_" -Level 'ERROR'
+            return "Failed to create target profile: $_"
+        }
+    } else {
+        Write-Log -Message "Target profile path validated: $targetProfile"
+    }
     $xd=@("AppData\Local\Temp","AppData\Local\Packages","AppData\Local\Microsoft\Windows\INetCache","AppData\Local\CrashDumps"); if(-not $IncludeOneDrive){ $xd += Get-ChildItem -Path $SourceFolder -Directory -Filter "OneDrive*" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name }
     $xdArgs=@(); foreach($d in $xd){ $xdArgs += @("/XD",(Join-Path $SourceFolder $d)) }
     $isUnc=$SourceFolder.StartsWith("\\"); $copyFlags=@("/COPY:DAT","/DCOPY:DAT"); if(-not $isUnc){ $copyFlags += "/SEC" }
@@ -2067,10 +2086,12 @@ $lblDom = New-Object System.Windows.Forms.Label; $lblDom.Text = "Optional: Join 
 $tbDomain = New-Object System.Windows.Forms.TextBox; $tbDomain.SetBounds(10,95,300,25)
 $lblOU = New-Object System.Windows.Forms.Label; $lblOU.Text = "Optional OU (distinguished name):"; $lblOU.SetBounds(320,70,250,20)
 $tbOU = New-Object System.Windows.Forms.TextBox; $tbOU.SetBounds(320,95,300,25)
-$btnStartRestore = New-Object System.Windows.Forms.Button; $btnStartRestore.Text = "Start Restore"; $btnStartRestore.SetBounds(10,130,150,32)
-$btnDefaults = New-Object System.Windows.Forms.Button; $btnDefaults.Text = "Open Default Apps Guidance"; $btnDefaults.SetBounds(170,130,220,32); $btnDefaults.Add_Click({ Open-DefaultAppsGuidance })
-$btnApplySysDefaults = New-Object System.Windows.Forms.Button; $btnApplySysDefaults.Text = "Apply System Default Apps (DISM)"; $btnApplySysDefaults.SetBounds(400,130,240,32); $btnApplySysDefaults.Add_Click({ $m=$null; if(Test-Path $tbMan.Text){ $m=Load-Json -Path $tbMan.Text }; if($m){ Apply-SystemDefaultAppsFromManifest -Manifest $m } })
-$btnOpenManifestFolder = New-Object System.Windows.Forms.Button; $btnOpenManifestFolder.Text = "Open Manifest Folder"; $btnOpenManifestFolder.SetBounds(650,130,180,32); $btnOpenManifestFolder.Add_Click({
+$lblDomainUser = New-Object System.Windows.Forms.Label; $lblDomainUser.Text = "Target Domain Username (if joining domain, username only e.g. 'jsmith'):"; $lblDomainUser.SetBounds(10,125,500,20)
+$tbDomainUser = New-Object System.Windows.Forms.TextBox; $tbDomainUser.SetBounds(10,150,300,25)
+$btnStartRestore = New-Object System.Windows.Forms.Button; $btnStartRestore.Text = "Start Restore"; $btnStartRestore.SetBounds(10,185,150,32)
+$btnDefaults = New-Object System.Windows.Forms.Button; $btnDefaults.Text = "Open Default Apps Guidance"; $btnDefaults.SetBounds(170,185,220,32); $btnDefaults.Add_Click({ Open-DefaultAppsGuidance })
+$btnApplySysDefaults = New-Object System.Windows.Forms.Button; $btnApplySysDefaults.Text = "Apply System Default Apps (DISM)"; $btnApplySysDefaults.SetBounds(400,185,240,32); $btnApplySysDefaults.Add_Click({ $m=$null; if(Test-Path $tbMan.Text){ $m=Load-Json -Path $tbMan.Text }; if($m){ Apply-SystemDefaultAppsFromManifest -Manifest $m } })
+$btnOpenManifestFolder = New-Object System.Windows.Forms.Button; $btnOpenManifestFolder.Text = "Open Manifest Folder"; $btnOpenManifestFolder.SetBounds(650,185,180,32); $btnOpenManifestFolder.Add_Click({
     if (Test-Path $tbMan.Text) {
         $folder = Split-Path -Parent $tbMan.Text
         if ($folder -and (Test-Path $folder)) {
@@ -2081,12 +2102,12 @@ $btnOpenManifestFolder = New-Object System.Windows.Forms.Button; $btnOpenManifes
     }
 })
 # Profile source root picker
-$lblSrc = New-Object System.Windows.Forms.Label; $lblSrc.Text = "Profile source ROOT (contains OLDHOST_DD-MM-YYYY folder):"; $lblSrc.SetBounds(10,170,480,20)
-$tbSrcRoot = New-Object System.Windows.Forms.TextBox; $tbSrcRoot.SetBounds(10,195,650,25)
-$btnBrowseSrc = New-Object System.Windows.Forms.Button; $btnBrowseSrc.Text = "Browse..."; $btnBrowseSrc.SetBounds(670,194,80,27); $btnBrowseSrc.Add_Click({ $sel=Select-FolderDialog; if($sel){ $tbSrcRoot.Text=$sel } })
-$lvRestore = New-Object System.Windows.Forms.TextBox; $lvRestore.Multiline = $true; $lvRestore.ReadOnly = $true; $lvRestore.ScrollBars = 'Vertical'; $lvRestore.SetBounds(10,230,820,275)
+$lblSrc = New-Object System.Windows.Forms.Label; $lblSrc.Text = "Profile source ROOT (contains OLDHOST_DD-MM-YYYY folder):"; $lblSrc.SetBounds(10,225,480,20)
+$tbSrcRoot = New-Object System.Windows.Forms.TextBox; $tbSrcRoot.SetBounds(10,250,650,25)
+$btnBrowseSrc = New-Object System.Windows.Forms.Button; $btnBrowseSrc.Text = "Browse..."; $btnBrowseSrc.SetBounds(670,249,80,27); $btnBrowseSrc.Add_Click({ $sel=Select-FolderDialog; if($sel){ $tbSrcRoot.Text=$sel } })
+$lvRestore = New-Object System.Windows.Forms.TextBox; $lvRestore.Multiline = $true; $lvRestore.ReadOnly = $true; $lvRestore.ScrollBars = 'Vertical'; $lvRestore.SetBounds(10,285,820,220)
 Add-LogSubscriber { param($line) $lvRestore.AppendText($line + [Environment]::NewLine) }
-$tabRestore.Controls.AddRange(@($lblMan,$tbMan,$btnBrowseMan,$lblDom,$tbDomain,$lblOU,$tbOU,$btnStartRestore,$btnDefaults,$btnApplySysDefaults,$btnOpenManifestFolder,$lblSrc,$tbSrcRoot,$btnBrowseSrc,$lvRestore))
+$tabRestore.Controls.AddRange(@($lblMan,$tbMan,$btnBrowseMan,$lblDom,$tbDomain,$lblOU,$tbOU,$lblDomainUser,$tbDomainUser,$btnStartRestore,$btnDefaults,$btnApplySysDefaults,$btnOpenManifestFolder,$lblSrc,$tbSrcRoot,$btnBrowseSrc,$lvRestore))
 
 $tbMan.Add_TextChanged({
     $path = $tbMan.Text
@@ -2145,15 +2166,24 @@ $btnStartRestore.Add_Click({
 
     $domain = $tbDomain.Text.Trim()
     $ou     = $tbOU.Text.Trim()
+    $domainUser = $tbDomainUser.Text.Trim()
     $createdLocalUser = $false
     $targetLocalUser  = $null
+    $targetDomainUser = $null
 
     if ($domain) {
         try {
+            # Validate domain user was provided
+            if ([string]::IsNullOrWhiteSpace($domainUser)) {
+                Write-Log -Message "Target domain username required when joining domain. Please specify the username." -Level 'ERROR'
+                [System.Windows.Forms.MessageBox]::Show("Please enter the target domain username (e.g., 'jsmith') to receive the migrated profile.","Domain User Required","OK","Warning") | Out-Null
+                return
+            }
             $cred = $Host.UI.PromptForCredential("Domain Join","Enter credentials permitted to join $domain","$env:USERDOMAIN\$env:USERNAME",$domain)
             if ($ou) { Add-Computer -DomainName $domain -OUPath $ou -Credential $cred -ErrorAction Stop }
             else     { Add-Computer -DomainName $domain -Credential $cred -ErrorAction Stop }
-            Write-Log -Message "Domain join scheduled."
+            Write-Log -Message "Domain join scheduled. Target user: $domainUser"
+            $targetDomainUser = $domainUser
             $needReboot = $true
         } catch { Write-Log -Message "Domain join failed: $_" -Level 'ERROR' }
     } else {
@@ -2177,7 +2207,7 @@ $btnStartRestore.Add_Click({
     }
 
     # Save state and register resumes
-    $state = @{ NextPhase = "PostJoin"; ManifestPath = $tbMan.Text; ProfileSource = $profileSource; IncludeOneDrive = [bool]$manifest.IncludeOneDrive; TargetLocalUser = $targetLocalUser }
+    $state = @{ NextPhase = "PostJoin"; ManifestPath = $tbMan.Text; ProfileSource = $profileSource; IncludeOneDrive = [bool]$manifest.IncludeOneDrive; TargetLocalUser = $targetLocalUser; TargetDomainUser = $targetDomainUser }
     $statePath = Get-StatePath
     if ($statePath) {
         Save-Json -Object $state -Path $statePath
@@ -2189,7 +2219,16 @@ $btnStartRestore.Add_Click({
     $resumeScriptPath = Get-ExecutableScriptPath
     if (-not [string]::IsNullOrWhiteSpace($resumeScriptPath)) {
         New-RunOnceResume -ScriptPath $resumeScriptPath -ManifestPath $tbMan.Text
-        if ($createdLocalUser) { Register-UserResumeTaskEx -UserName $targetLocalUser -ScriptPath $resumeScriptPath -ManifestPath $tbMan.Text | Out-Null }
+        # Register user-context resume task for either local or domain user
+        $resumeUser = $null
+        if ($createdLocalUser) { $resumeUser = $targetLocalUser }
+        elseif ($targetDomainUser) { $resumeUser = $targetDomainUser }
+        if ($resumeUser) {
+            Write-Log -Message "Registering user-context resume task for: $resumeUser"
+            Register-UserResumeTaskEx -UserName $resumeUser -ScriptPath $resumeScriptPath -ManifestPath $tbMan.Text | Out-Null
+        } else {
+            Write-Log -Message "No target user specified; user-context resume will not run." -Level 'WARN'
+        }
     } else {
         Write-Log -Message 'Unable to determine script path for resume scheduling.' -Level 'WARN'
     }
@@ -2212,7 +2251,7 @@ $btnStartRestore.Add_Click({
             }
         }
     } catch { Write-Log -Message "Wireless profile import error: $($_)" -Level 'WARN' }
-    Restore-WallpaperAndSignatures
+    # Wallpaper and signatures are restored in user-context resume (at user logon), not during system-context restore
     # Default app configuration is deferred until the target user logs in.
     # Do not show Outlook credentials during system-context restore; this will be handled in user context
     Write-Log -Message "=== RESTORE END ==="
@@ -2264,7 +2303,7 @@ if ($Resume) {
                     }
                 }
             } catch { Write-Log -Message "Wireless profile import error (resume): $($_)" -Level 'WARN' }
-            Restore-WallpaperAndSignatures
+            # Wallpaper and signatures are restored in user-context resume, not system-context
             Write-Log -Message "Post-join steps executed."
         } else {
             Write-Log -Message "Manifest missing on resume (path: $manifestPath)." -Level 'ERROR'
@@ -2311,7 +2350,18 @@ if ($ResumeUser) {
     }
 
     if ($state) {
-        $targetUser = $env:USERNAME
+        # Determine target user from state (domain user takes precedence, then local user, finally fallback to current user)
+        $targetUser = $null
+        if ($state.PSObject.Properties['TargetDomainUser'] -and -not [string]::IsNullOrWhiteSpace($state.TargetDomainUser)) {
+            $targetUser = $state.TargetDomainUser
+            Write-Log -Message "Using target domain user from state: $targetUser"
+        } elseif ($state.PSObject.Properties['TargetLocalUser'] -and -not [string]::IsNullOrWhiteSpace($state.TargetLocalUser)) {
+            $targetUser = $state.TargetLocalUser
+            Write-Log -Message "Using target local user from state: $targetUser"
+        } else {
+            $targetUser = $env:USERNAME
+            Write-Log -Message "No target user in state; using current user: $targetUser" -Level 'WARN'
+        }
         $src = $state.ProfileSource
         $incl = [bool]$state.IncludeOneDrive
         if ($src) {

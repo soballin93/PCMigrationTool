@@ -1,0 +1,146 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main, rewrite, develop ]
+  pull_request:
+    branches: [ main, rewrite ]
+
+jobs:
+  lint-and-test:
+    name: Lint and Test
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install PSScriptAnalyzer
+      shell: pwsh
+      run: |
+        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+        Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+        Install-Module -Name Pester -Force -Scope CurrentUser -SkipPublisherCheck
+
+    - name: Run PSScriptAnalyzer
+      shell: pwsh
+      run: |
+        Write-Host "Running PSScriptAnalyzer..." -ForegroundColor Cyan
+        $results = Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\.vscode\PSScriptAnalyzerSettings.psd1 -ReportSummary
+
+        if ($results) {
+          Write-Host "`nFound $($results.Count) issues:" -ForegroundColor Yellow
+          $results | Format-Table -AutoSize
+
+          $errors = $results | Where-Object Severity -eq 'Error'
+          $warnings = $results | Where-Object Severity -eq 'Warning'
+
+          Write-Host "`nSummary:" -ForegroundColor Cyan
+          Write-Host "  Errors: $($errors.Count)" -ForegroundColor Red
+          Write-Host "  Warnings: $($warnings.Count)" -ForegroundColor Yellow
+
+          if ($errors.Count -gt 0) {
+            Write-Host "`nFailing build due to errors." -ForegroundColor Red
+            exit 1
+          }
+        } else {
+          Write-Host "No issues found!" -ForegroundColor Green
+        }
+
+    - name: Syntax Check
+      shell: pwsh
+      run: |
+        Write-Host "Performing syntax validation..." -ForegroundColor Cyan
+        $scripts = Get-ChildItem -Path . -Filter *.ps1 -Recurse | Where-Object { $_.FullName -notmatch '\\(node_modules|\.git)\\' }
+
+        $errors = @()
+        foreach ($script in $scripts) {
+          Write-Host "Checking $($script.Name)..." -ForegroundColor Gray
+          $content = Get-Content -Path $script.FullName -Raw
+          $parseErrors = $null
+          $null = [System.Management.Automation.PSParser]::Tokenize($content, [ref]$parseErrors)
+
+          if ($parseErrors) {
+            $errors += [PSCustomObject]@{
+              File = $script.Name
+              Errors = $parseErrors
+            }
+            Write-Host "  FAILED: $($parseErrors.Count) syntax errors" -ForegroundColor Red
+          } else {
+            Write-Host "  PASSED" -ForegroundColor Green
+          }
+        }
+
+        if ($errors.Count -gt 0) {
+          Write-Host "`nSyntax errors found in $($errors.Count) file(s):" -ForegroundColor Red
+          foreach ($err in $errors) {
+            Write-Host "`n$($err.File):" -ForegroundColor Yellow
+            $err.Errors | Format-Table -AutoSize
+          }
+          exit 1
+        } else {
+          Write-Host "`nAll scripts passed syntax validation!" -ForegroundColor Green
+        }
+
+    - name: Run Pester Tests
+      shell: pwsh
+      run: |
+        Write-Host "Running Pester tests..." -ForegroundColor Cyan
+
+        $config = New-PesterConfiguration
+        $config.Run.Path = './tests'
+        $config.Run.Exit = $true
+        $config.TestResult.Enabled = $true
+        $config.TestResult.OutputPath = 'testResults.xml'
+        $config.Output.Verbosity = 'Detailed'
+        $config.CodeCoverage.Enabled = $false  # Enable when you want coverage reports
+
+        if (Test-Path './tests') {
+          Invoke-Pester -Configuration $config
+        } else {
+          Write-Host "No tests directory found - skipping tests" -ForegroundColor Yellow
+          Write-Host "Create ./tests directory and add *.Tests.ps1 files" -ForegroundColor Yellow
+        }
+
+    - name: Upload Test Results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: testResults.xml
+        if-no-files-found: ignore
+
+  security-scan:
+    name: Security Scan
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Security and Best Practices Check
+      shell: pwsh
+      run: |
+        Write-Host "Running security checks..." -ForegroundColor Cyan
+        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+        Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+
+        $securityRules = @(
+          'PSAvoidUsingConvertToSecureStringWithPlainText',
+          'PSAvoidUsingPlainTextForPassword',
+          'PSAvoidUsingUsernameAndPasswordParams',
+          'PSAvoidUsingInvokeExpression',
+          'PSUseShouldProcessForStateChangingFunctions'
+        )
+
+        $results = Invoke-ScriptAnalyzer -Path . -Recurse -IncludeRule $securityRules
+
+        if ($results) {
+          Write-Host "`nSecurity concerns found:" -ForegroundColor Red
+          $results | Format-Table -AutoSize
+
+          # Don't fail the build, just warn
+          Write-Host "`nPlease review these security findings." -ForegroundColor Yellow
+        } else {
+          Write-Host "No security issues detected!" -ForegroundColor Green
+        }

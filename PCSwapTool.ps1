@@ -1,8 +1,8 @@
 
-<# 
+<#
     .SYNOPSIS
     PC Swap Tool (GUI) - Gather & Restore
-    Version: 0.5.33 (2025-10-04)
+    Version: 0.5.34
 
 
 
@@ -13,6 +13,14 @@
     to a replacement machine. Native Windows only.
 
 .CHANGELOG
+    0.5.34
+      - Fix: Domain-joined computer support. Added target domain username field to
+        Restore tab UI, stored TargetDomainUser in state.json, and registered user-context
+        resume task for domain users (not just local users). User resume phase now reads
+        target user from state instead of always using $env:USERNAME. Profile path
+        validation added with helpful warnings for domain scenarios. This fixes critical
+        issue where profile restoration never ran for domain-joined machines.
+      - Date: 2026-02-07
     0.5.33
       - Restore: Replace the automatic reboot with a technician prompt that reboots the
         workstation when they confirm, keeping the workflow in sync with hostname/domain
@@ -42,43 +50,6 @@
       - Fix: Preserve the script path when registering resume actions so restore
         tasks schedule correctly even when $PSCommandPath is blank.
       - Date: 2025-09-29
-
-    0.5.27
-      - Improvement: Launch Chrome automatically to chrome://settings/passwords when guiding
-        technicians through the manual password export.
-      - Date: 2025-09-28
-
-    0.5.26
-      - Change: Removed automated Chrome password export and restored technician-guided instructions.
-      - Date: 2025-09-27
-
-    0.5.25
-      - Fix: Fall back to DPAPI when Chrome AES-GCM secrets fail authentication
-        so legacy DPAPI entries with "vXX" prefixes still decrypt correctly.
-      - Date: 2025-09-27
-
-    0.5.24
-      - Fix: Instantiate the Chrome AES key parameter without splatting individual
-        bytes so BouncyCastle accepts 32-byte keys on newer builds.
-      - Date: 2025-09-27
-    0.5.23
-      - Fix: Treat Chrome secrets with any "vXX" prefix as AES-GCM so newer Chrome
-        builds decrypt correctly instead of falling back to DPAPI and failing.
-      - Fix: Retry DPAPI secrets with the LocalMachine scope when CurrentUser
-        decryption is unavailable, covering service and system profiles.
-      - Date: 2025-09-27
-    0.5.22
-      - Change: Skip creating the Chrome password CSV when no credentials can be
-        decrypted and remove any stale export so manifests remain accurate.
-      - Improvement: Surface the "no credentials" outcome without treating it as
-        a successful export, preventing empty files from appearing in the
-        repository.
-      - Date: 2025-09-27
-    0.5.21
-      - Fix: Initialize the ProtectedDataReady flag before first use so Chrome password
-        export no longer fails under StrictMode when the ProtectedData type is loaded
-        on demand.
-      - Date: 2025-09-27
     0.5.10
       - Feature: Read default PDF and browser ProgIds from the new UserChoiceLatest registry keys when available (for ".pdf" and HTTP associations) and fall back to legacy UserChoice keys. This prevents defaults from appearing as MS Edge when Chrome/Adobe are set.
       - Bumped version and changelog accordingly.
@@ -211,7 +182,7 @@
       - PowerShell 5.1, run as admin.
     Limitations (intentional):
       - Default apps cannot be set silently per-user; we record ProgIDs and open Settings.
-      - Chrome password export remains manual; the tool opens chrome://settings/passwords automatically.
+      - Browser password exports are manual; the tool detects browsers and opens them to their password export pages.
 
 #>
 
@@ -232,7 +203,8 @@ Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ------------------------------- Globals -------------------------------------
-$ProgramVersion = '0.5.33'
+$ProgramVersion = '0.5.34'
+$ManifestSchemaVersion = '1.0'
 $TodayStamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Desktop        = [Environment]::GetFolderPath('Desktop')
 $SwapInfoRoot   = $null
@@ -243,7 +215,7 @@ $StatePath      = $null
 $DeregListPath = $null
 $ChromeCsvName  = 'Chrome Passwords.csv'
 $WallpaperName  = 'TranscodedWallpaper'
-$ScriptFileName = 'PCSwapTool_v0.5.20.ps1'
+$ScriptFileName = 'PCSwapTool.ps1'
 
 $script:ToolRoot = try {
     $cmdPath = $MyInvocation.MyCommand.Path
@@ -615,6 +587,77 @@ function Write-Log {
     }
 }
 
+function Protect-String {
+    param([string]$PlainText)
+    try {
+        $encryptedBytes = [System.Security.Cryptography.ProtectedData]::Protect(
+            [System.Text.Encoding]::UTF8.GetBytes($PlainText),
+            $null,
+            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        return [Convert]::ToBase64String($encryptedBytes)
+    } catch {
+        Write-Log -Message "String protection failed: $_" -Level 'WARN'
+        return $PlainText
+    }
+}
+
+function Unprotect-String {
+    param([string]$EncryptedText)
+    try {
+        $encryptedBytes = [Convert]::FromBase64String($EncryptedText)
+        $decryptedBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+            $encryptedBytes,
+            $null,
+            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        return [System.Text.Encoding]::UTF8.GetString($decryptedBytes)
+    } catch {
+        Write-Log -Message "String decryption failed (may be plaintext): $_" -Level 'WARN'
+        return $EncryptedText
+    }
+}
+
+function Test-DiskSpace {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [long]$MinimumGB = 10
+    )
+    try {
+        if (-not (Test-Path $Path)) { return $false }
+        $drive = Get-PSDrive -Name ([IO.Path]::GetPathRoot($Path).TrimEnd('\')[0]) -PSProvider FileSystem -ErrorAction SilentlyContinue
+        if (-not $drive) { return $true }
+        $freeGB = $drive.Free / 1GB
+        if ($freeGB -lt $MinimumGB) {
+            Write-Log -Message "Insufficient disk space: ${freeGB}GB available, ${MinimumGB}GB required" -Level 'WARN'
+            return $false
+        }
+        return $true
+    } catch {
+        Write-Log -Message "Disk space check failed: $_" -Level 'WARN'
+        return $true
+    }
+}
+
+function Remove-UserResumeTask {
+    [CmdletBinding()]
+    param([string]$TaskName = 'PCSwap-Resume-User')
+    try {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($task) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop | Out-Null
+            Write-Log -Message "Unregistered scheduled task: $TaskName"
+            return $true
+        } else {
+            Write-Log -Message "Scheduled task not found: $TaskName" -Level 'WARN'
+            return $false
+        }
+    } catch {
+        Write-Log -Message "Failed to unregister scheduled task $TaskName : $_" -Level 'ERROR'
+        return $false
+    }
+}
 
 # ------------------- Utility -------------------
 function Test-Admin {
@@ -870,77 +913,318 @@ function Get-UserInfoPack {
 
 # -------------- Chrome Password Guidance --------------
 
-function Show-ChromePasswordExportGuide {
+# ============================================================================
+# Browser Detection and Password Export
+# ============================================================================
+
+function Get-InstalledBrowsers {
+    <#
+    .SYNOPSIS
+        Detects installed browsers on the system
+    .DESCRIPTION
+        Checks for Chrome, Edge, Firefox, Brave, and Opera using file paths and registry keys
+    .OUTPUTS
+        Array of browser objects with Name, DisplayName, ExePath, PasswordUrl, and ExportFileName properties
+    #>
     [CmdletBinding()]
     param()
 
+    $browsers = @()
+
+    # Chrome
+    $chromePath = Get-BrowserExecutablePath -BrowserName 'Chrome' -ExecutableName 'chrome.exe' -CommonPaths @(
+        'Google\Chrome\Application\chrome.exe'
+    ) -RegistryPaths @(
+        'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe',
+        'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe'
+    )
+    if ($chromePath) {
+        $browsers += [PSCustomObject]@{
+            Name           = 'Chrome'
+            DisplayName    = 'Google Chrome'
+            ExePath        = $chromePath
+            PasswordUrl    = 'chrome://password-manager/settings'
+            ExportFileName = 'Chrome Passwords.csv'
+        }
+    }
+
+    # Edge
+    $edgePath = Get-BrowserExecutablePath -BrowserName 'Edge' -ExecutableName 'msedge.exe' -CommonPaths @(
+        'Microsoft\Edge\Application\msedge.exe'
+    ) -RegistryPaths @(
+        'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe',
+        'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe'
+    )
+    if ($edgePath) {
+        $browsers += [PSCustomObject]@{
+            Name           = 'Edge'
+            DisplayName    = 'Microsoft Edge'
+            ExePath        = $edgePath
+            PasswordUrl    = 'edge://settings/autofill/passwords'
+            ExportFileName = 'Microsoft Edge Passwords.csv'
+        }
+    }
+
+    # Firefox
+    $firefoxPath = Get-BrowserExecutablePath -BrowserName 'Firefox' -ExecutableName 'firefox.exe' -CommonPaths @(
+        'Mozilla Firefox\firefox.exe'
+    ) -RegistryPaths @(
+        'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe',
+        'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe'
+    )
+    if ($firefoxPath) {
+        $browsers += [PSCustomObject]@{
+            Name           = 'Firefox'
+            DisplayName    = 'Mozilla Firefox'
+            ExePath        = $firefoxPath
+            PasswordUrl    = 'about:logins'
+            ExportFileName = 'passwords.csv'
+        }
+    }
+
+    # Brave
+    $bravePath = Get-BrowserExecutablePath -BrowserName 'Brave' -ExecutableName 'brave.exe' -CommonPaths @(
+        'BraveSoftware\Brave-Browser\Application\brave.exe'
+    ) -RegistryPaths @(
+        'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\brave.exe',
+        'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\brave.exe'
+    )
+    if ($bravePath) {
+        $browsers += [PSCustomObject]@{
+            Name           = 'Brave'
+            DisplayName    = 'Brave Browser'
+            ExePath        = $bravePath
+            PasswordUrl    = 'brave://password-manager/settings'
+            ExportFileName = 'Brave Passwords.csv'
+        }
+    }
+
+    # Opera
+    $operaPath = Get-BrowserExecutablePath -BrowserName 'Opera' -ExecutableName 'opera.exe' -CommonPaths @(
+        'Opera\opera.exe',
+        'Programs\Opera\opera.exe'
+    ) -RegistryPaths @(
+        'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\opera.exe',
+        'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\opera.exe',
+        'HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\opera.exe'
+    )
+    if ($operaPath) {
+        $browsers += [PSCustomObject]@{
+            Name           = 'Opera'
+            DisplayName    = 'Opera Browser'
+            ExePath        = $operaPath
+            PasswordUrl    = 'opera://password-manager/settings'
+            ExportFileName = 'Opera Passwords.csv'
+        }
+    }
+
+    return $browsers
+}
+
+function Get-BrowserExecutablePath {
+    <#
+    .SYNOPSIS
+        Generic browser executable detection
+    .DESCRIPTION
+        Searches common install paths and registry keys for a browser executable
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$BrowserName,
+        [Parameter(Mandatory=$true)][string]$ExecutableName,
+        [Parameter(Mandatory=$true)][string[]]$CommonPaths,
+        [Parameter(Mandatory=$false)][string[]]$RegistryPaths = @()
+    )
+
+    # Check standard program files locations
+    $candidates = @()
+    foreach ($relPath in $CommonPaths) {
+        if ($env:ProgramFiles) {
+            $candidates += Join-Path $env:ProgramFiles $relPath
+        }
+        $programFilesX86 = ${env:ProgramFiles(x86)}
+        if ($programFilesX86) {
+            $candidates += Join-Path $programFilesX86 $relPath
+        }
+        if ($env:LOCALAPPDATA) {
+            $candidates += Join-Path $env:LOCALAPPDATA $relPath
+        }
+    }
+
+    # Check file paths first
+    foreach ($candidate in $candidates) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path $candidate)) {
+            Write-Log -Message "Detected $BrowserName at: $candidate"
+            return $candidate
+        }
+    }
+
+    # Check registry paths
+    foreach ($regPath in $RegistryPaths) {
+        try {
+            $value = [Microsoft.Win32.Registry]::GetValue($regPath, '', $null)
+            if ($value -is [string]) {
+                $resolved = $value.Trim('"')
+                if (-not [string]::IsNullOrWhiteSpace($resolved) -and (Test-Path $resolved)) {
+                    Write-Log -Message "Detected $BrowserName via registry at: $resolved"
+                    return $resolved
+                }
+            }
+        } catch {
+            # Registry key doesn't exist or can't be read - this is normal
+        }
+    }
+
+    return $null
+}
+
+function Show-BrowserPasswordExportGuide {
+    <#
+    .SYNOPSIS
+        Shows manual password export instructions for all detected browsers
+    .DESCRIPTION
+        Opens password management pages for all installed browsers and provides
+        export instructions to technician
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]$Browsers
+    )
+
+    if ($Browsers.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "No browsers detected on this system.",
+            "No Browsers Found",
+            'OK',
+            'Information'
+        ) | Out-Null
+        return
+    }
+
     $repoRoot = Get-SwapInfoRoot
     if (-not $repoRoot) {
-        Write-Log -Message 'SwapInfoRoot not set when displaying Chrome export guidance.' -Level 'WARN'
+        Write-Log -Message 'SwapInfoRoot not set when displaying browser export guidance.' -Level 'WARN'
+        [System.Windows.Forms.MessageBox]::Show(
+            "Error: Repository not initialized. Please ensure gather process has started.",
+            "Repository Error",
+            'OK',
+            'Error'
+        ) | Out-Null
+        return
     }
 
-    $targetPath = if ($repoRoot) { Join-Path $repoRoot $ChromeCsvName } else { $ChromeCsvName }
-
-    $launchUrl = 'chrome://settings/passwords'
-    $chromePath = $null
-    $chromeLaunched = $false
-
-    try {
-        $chromePath = Get-ChromeExecutablePath
-    } catch {
-        Write-Log -Message "Failed to resolve Chrome executable path: $($_)" -Level 'WARN'
+    $exportFolder = Join-Path $repoRoot 'Browser_Exports'
+    if (-not (Test-Path $exportFolder)) {
+        New-Item -ItemType Directory -Path $exportFolder -Force | Out-Null
+        Write-Log -Message "Created Browser_Exports folder: $exportFolder"
     }
 
-    if ($chromePath) {
-        try {
-            Start-Process -FilePath $chromePath -ArgumentList $launchUrl -ErrorAction Stop | Out-Null
-            Write-Log -Message "Launched Chrome at $launchUrl using resolved path: $chromePath"
-            $chromeLaunched = $true
-        } catch {
-            Write-Log -Message "Failed to launch Chrome using resolved path ${chromePath}: $($_)" -Level 'WARN'
-        }
-    }
-
-    if (-not $chromeLaunched) {
-        try {
-            if (-not $chromePath) {
-                Write-Log -Message 'Chrome executable path not resolved; attempting PATH-based launch for chrome://settings/passwords.'
-            } else {
-                Write-Log -Message 'Attempting PATH-based Chrome launch for chrome://settings/passwords after resolved-path failure.'
-            }
-            Start-Process -FilePath 'chrome.exe' -ArgumentList $launchUrl -ErrorAction Stop | Out-Null
-            Write-Log -Message 'Launched Chrome at chrome://settings/passwords via PATH fallback.'
-            $chromeLaunched = $true
-        } catch {
-            Write-Log -Message "Unable to launch Chrome automatically for password export: $($_)" -Level 'WARN'
-        }
-    }
-
+    # Build instructions for each browser
     $instructions = @"
-Chrome passwords must be exported manually:
+Browser Password Export Instructions
+=====================================
 
-1. Chrome should open automatically to chrome://settings/passwords. If it does not, open Google Chrome and browse to that address.
-2. In ""Saved Passwords"", open the three-dot menu and choose ""Export passwords"".
-3. Approve the Windows security prompt when asked to confirm the export.
-4. Save the CSV as ""$ChromeCsvName"" in the repository folder shown below:
-   $targetPath
+Detected browsers: $($Browsers.Count)
+
 "@
 
-    Write-Log -Message 'Displayed manual Chrome password export instructions.'
-    [System.Windows.Forms.MessageBox]::Show($instructions, 'Chrome Password Export', 'OK', 'Information') | Out-Null
+    foreach ($browser in $Browsers) {
+        $instructions += "`n$($browser.DisplayName):"
+        $instructions += "`n  1. Browser will open automatically to the passwords page"
 
-    if ($repoRoot) {
-        $chromeCsvPath = Join-Path $repoRoot $ChromeCsvName
-        if (Test-Path $chromeCsvPath) {
-            Write-Log -Message "Validated presence of manual Chrome password export: $chromeCsvPath" -Level 'INFO'
-        } else {
-            Write-Log -Message "Chrome password CSV not found at expected path after technician acknowledged instructions: $chromeCsvPath" -Level 'WARN'
+        switch ($browser.Name) {
+            'Chrome' {
+                $instructions += "`n  2. Click the settings icon (⋮) next to 'Saved Passwords'"
+                $instructions += "`n  3. Select 'Export passwords'"
+                $instructions += "`n  4. Confirm and save as: $($browser.ExportFileName)"
+            }
+            'Edge' {
+                $instructions += "`n  2. Click the three dots (...) next to 'Saved passwords'"
+                $instructions += "`n  3. Select 'Export passwords'"
+                $instructions += "`n  4. Confirm and save as: $($browser.ExportFileName)"
+            }
+            'Firefox' {
+                $instructions += "`n  2. Click the three dots menu in the top-right"
+                $instructions += "`n  3. Select 'Export Logins...'"
+                $instructions += "`n  4. Confirm and save as: $($browser.ExportFileName)"
+            }
+            'Brave' {
+                $instructions += "`n  2. Click the settings icon (⋮) next to 'Saved Passwords'"
+                $instructions += "`n  3. Select 'Export passwords'"
+                $instructions += "`n  4. Confirm and save as: $($browser.ExportFileName)"
+            }
+            'Opera' {
+                $instructions += "`n  2. Click 'Manage saved passwords'"
+                $instructions += "`n  3. Click 'Export' button"
+                $instructions += "`n  4. Save as: $($browser.ExportFileName)"
+            }
         }
-    } else {
-        Write-Log -Message 'Skipping Chrome password CSV validation because SwapInfoRoot is not set.' -Level 'WARN'
+        $instructions += "`n"
     }
 
-    return $true
+    $instructions += "`nSave Location:"
+    $instructions += "`n  $exportFolder"
+    $instructions += "`n`nIMPORTANT:"
+    $instructions += "`n  - Files must be saved to the location above"
+    $instructions += "`n  - Use the exact filenames shown"
+    $instructions += "`n  - Click 'Validate Exports' when done to verify"
+
+    # Launch all browsers
+    Write-Log -Message "Launching $($Browsers.Count) browser(s) for password export..."
+    foreach ($browser in $Browsers) {
+        try {
+            Start-Process -FilePath $browser.ExePath -ArgumentList $browser.PasswordUrl -ErrorAction Stop | Out-Null
+            Write-Log -Message "Launched $($browser.DisplayName) at $($browser.PasswordUrl)"
+        } catch {
+            Write-Log -Message "Failed to launch $($browser.DisplayName): $($_)" -Level 'WARN'
+        }
+    }
+
+    # Show instructions
+    [System.Windows.Forms.MessageBox]::Show(
+        $instructions,
+        "Browser Password Export Guide",
+        'OK',
+        'Information'
+    ) | Out-Null
+}
+
+function Test-BrowserPasswordExports {
+    <#
+    .SYNOPSIS
+        Validates that password CSV files exist for detected browsers
+    .DESCRIPTION
+        Checks Browser_Exports folder for required CSV files
+    .OUTPUTS
+        Hashtable with browser names as keys and export status as values
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]$Browsers
+    )
+
+    $repoRoot = Get-SwapInfoRoot
+    if (-not $repoRoot) {
+        Write-Log -Message 'SwapInfoRoot not set; cannot validate browser exports.' -Level 'WARN'
+        return @{}
+    }
+
+    $exportFolder = Join-Path $repoRoot 'Browser_Exports'
+    $results = @{}
+
+    foreach ($browser in $Browsers) {
+        $csvPath = Join-Path $exportFolder $browser.ExportFileName
+        $exists = Test-Path $csvPath
+        $results[$browser.Name] = $exists
+
+        if ($exists) {
+            Write-Log -Message "$($browser.DisplayName) password export found: $csvPath"
+        } else {
+            Write-Log -Message "$($browser.DisplayName) password export NOT found: $csvPath" -Level 'WARN'
+        }
+    }
+
+    return $results
 }
 
 
@@ -1033,6 +1317,8 @@ function Build-Manifest { param($General,$Computer,$User,$IncludeOneDrive)
     $wifiExported = $false
     $screenshotFolder = $null
     $screenshotFiles = @()
+    $browserExports = @()
+
     if ($repoRoot) {
         $screenshotFolder = Join-Path $repoRoot 'Screenshots'
         if (Test-Path $screenshotFolder) {
@@ -1044,17 +1330,35 @@ function Build-Manifest { param($General,$Computer,$User,$IncludeOneDrive)
                 Write-Log -Message "Unable to enumerate desktop screenshots: $_" -Level 'WARN'
             }
         }
+
+        # Legacy Chrome CSV check for backwards compatibility
         $chromeCsvPresent = Test-Path (Join-Path $repoRoot $ChromeCsvName)
+
         $wallpaperCopied = Test-Path (Join-Path $repoRoot $WallpaperName)
         $signaturesCopied = Test-Path (Join-Path $repoRoot 'Signatures')
         $wifiExported = Test-Path (Join-Path $repoRoot 'WirelessProfiles')
+
+        # Check browser password exports
+        if ($script:DetectedBrowsers.Count -gt 0) {
+            $exportResults = Test-BrowserPasswordExports -Browsers $script:DetectedBrowsers
+            foreach ($browser in $script:DetectedBrowsers) {
+                $browserExports += [PSCustomObject]@{
+                    Name = $browser.Name
+                    DisplayName = $browser.DisplayName
+                    Exported = $exportResults[$browser.Name]
+                    FileName = $browser.ExportFileName
+                }
+            }
+        }
     } else {
         Write-Log -Message 'SwapInfoRoot not set while building manifest; repository checks skipped.' -Level 'WARN'
     }
     [PSCustomObject]@{
+        SchemaVersion="1.0"
         Mode="Gather"; General=$General; Computer=$Computer; User=$User; IncludeOneDrive=[bool]$IncludeOneDrive
         CollectedBy="$env:USERDOMAIN\$env:USERNAME"; CollectedAt=(Get-Date).ToString('s')
         ChromeCsv=$chromeCsvPresent
+        BrowserPasswordExports=$browserExports
         WallpaperCopied=$wallpaperCopied
         SignaturesCopied=$signaturesCopied
         DeregChecklist=Ensure-DeregList
@@ -1091,7 +1395,7 @@ function Write-Report { param($Manifest,$CopySummary)
     $L += ""
     $L += "---- Summary ----"
     $L += "Include OneDrive: $($Manifest.IncludeOneDrive)"
-    $L += "Chrome passwords CSV present (manual export): $($Manifest.ChromeCsv)"
+    $L += "Chrome passwords CSV present (legacy): $($Manifest.ChromeCsv)"
     $L += "Wallpaper copied: $($Manifest.WallpaperCopied)"
     $L += "Outlook signatures: $($Manifest.SignaturesCopied)"
     $L += "Desktop screenshots captured: $($desktopScreenshotCount -gt 0)"
@@ -1153,13 +1457,14 @@ function Copy-UserProfile {
     $destRoot=$BaseDestinationPath; $dest=Join-Path $destRoot ("{0}_{1}" -f $hostName,$dateStr)
     try{ if(-not (Test-Path $destRoot)){ New-Item -ItemType Directory -Path $destRoot -Force|Out-Null }; New-Item -ItemType Directory -Path $dest -Force|Out-Null }catch{ Write-Log -Message "Create dest dirs failed: $_" -Level 'ERROR'; return "Failed to create $dest : $_" }
     $source=[Environment]::GetFolderPath("UserProfile")
-    $xd=@("AppData\Local\Temp","AppData\Local\Packages","AppData\Local\Microsoft","AppData\Local\CrashDumps"); if(-not $IncludeOneDrive){ $xd += "OneDrive" }
+    $xd=@("AppData\Local\Temp","AppData\Local\Packages","AppData\Local\Microsoft","AppData\Local\CrashDumps"); if(-not $IncludeOneDrive){ $xd += Get-ChildItem -Path $source -Directory -Filter "OneDrive*" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name }
     $xdArgs=@(); foreach($d in $xd){ $xdArgs += @("/XD",(Join-Path $source $d)) }
     $isUnc=$dest.StartsWith("\\"); $copyFlags=@("/COPY:DAT","/DCOPY:DAT"); if(-not $isUnc){ $copyFlags += "/SEC" }
     $args=@($source,$dest,"/E","/R:1","/W:1","/XJ") + $copyFlags + $xdArgs
     Write-Log -Message "Robocopy (gather) -> $dest Flags=$($copyFlags -join ' ')"
     $proc=Start-Process -FilePath robocopy.exe -ArgumentList $args -Wait -PassThru -NoNewWindow
     $code=$proc.ExitCode; Write-Log -Message "Robocopy exit code: $code"
+    if ($code -gt 1) { Write-Log -Message "Robocopy warning/error: exit code $code (0=success, 1=files copied ok, 2+=partial failure)" -Level 'WARN' }
     "Robocopy exit code: $code (0/1=OK). Source: $source Dest: $dest Flags: $($copyFlags -join ' ')"
 }
 
@@ -1271,11 +1576,41 @@ function Restart-WindowsExplorer {
 }
 function Open-DefaultAppsGuidance {
     [System.Diagnostics.Process]::Start("ms-settings:defaultapps") | Out-Null
-    [System.Windows.Forms.MessageBox]::Show(
-"Windows blocks scripted per-user default-app changes.
-Captured defaults (manifest User.*ProgId) are shown in the report.
-Set PDF and Browser now for the current user.",
-"Default Apps Guidance",'OK','Information') | Out-Null
+
+    # Load manifest to show actual default programs
+    $manifest = $null
+    if ($tbMan.Text -and (Test-Path $tbMan.Text)) {
+        try {
+            $manifest = Load-Json -Path $tbMan.Text
+        } catch {
+            Write-Log -Message "Failed to load manifest for default apps display: $_" -Level 'WARN'
+        }
+    }
+
+    $messageText = "Windows blocks scripted per-user default-app changes.`n`n"
+
+    if ($manifest -and $manifest.User) {
+        $messageText += "Default programs from source machine:`n`n"
+
+        if ($manifest.User.PSObject.Properties['DefaultPdfProgId'] -and $manifest.User.DefaultPdfProgId) {
+            $messageText += "PDF Viewer: $($manifest.User.DefaultPdfProgId)`n"
+        } else {
+            $messageText += "PDF Viewer: (not captured)`n"
+        }
+
+        if ($manifest.User.PSObject.Properties['DefaultBrowserProgId'] -and $manifest.User.DefaultBrowserProgId) {
+            $messageText += "Browser: $($manifest.User.DefaultBrowserProgId)`n"
+        } else {
+            $messageText += "Browser: (not captured)`n"
+        }
+
+        $messageText += "`nPlease set these defaults now for the current user."
+    } else {
+        $messageText += "No manifest loaded - cannot display captured defaults.`n"
+        $messageText += "Set PDF and Browser now for the current user."
+    }
+
+    [System.Windows.Forms.MessageBox]::Show($messageText, "Default Apps Guidance", 'OK', 'Information') | Out-Null
 }
 function Apply-SystemDefaultAppsFromManifest { param($Manifest)
     try{
@@ -1383,7 +1718,8 @@ function Prompt-OutlookAccount {
     $form.CancelButton = $btnCancel
     if ($form.ShowDialog() -ne 'OK') { return $null }
     if ([string]::IsNullOrWhiteSpace($tbEmail.Text) -or [string]::IsNullOrWhiteSpace($tbPass.Text)) { return $null }
-    return [PSCustomObject]@{ Email = $tbEmail.Text.Trim(); Password = $tbPass.Text }
+    $encryptedPassword = Protect-String -PlainText $tbPass.Text
+    return [PSCustomObject]@{ Email = $tbEmail.Text.Trim(); Password = $encryptedPassword }
 }
 
 # Show the stored Outlook account credentials to the technician during restore.
@@ -1400,11 +1736,12 @@ function Show-OutlookAccountForRestore { param($Cred)
     } catch {
         Write-Log -Message "Failed to launch Outlook: $_" -Level 'WARN'
     }
+    $displayPassword = Unprotect-String -EncryptedText $Cred.Password
     [System.Windows.Forms.MessageBox]::Show(
 "Use the following credentials to add the Outlook account on this machine.
 
 Email: $($Cred.Email)
-Password: $($Cred.Password)
+Password: $displayPassword
 
 Open Outlook and go to File -> Add Account, then enter the above credentials when prompted.  After the account is added, you may delete these credentials from the manifest or change the password for security.",
 "Outlook Account Setup", 'OK','Information') | Out-Null
@@ -1475,8 +1812,19 @@ function Register-UserResumeTaskEx {
 function Copy-ProfileToUser { param([string]$SourceFolder,[string]$TargetUserName,[bool]$IncludeOneDrive)
     if(-not (Test-Path $SourceFolder)){ Write-Log -Message "Source folder missing: $SourceFolder" -Level 'ERROR'; return "Source not found: $SourceFolder" }
     $targetProfile=Join-Path 'C:\Users' $TargetUserName
-    if(-not (Test-Path $targetProfile)){ New-Item -ItemType Directory -Path $targetProfile -Force | Out-Null }
-    $xd=@("AppData\Local\Temp","AppData\Local\Packages","AppData\Local\Microsoft\Windows\INetCache","AppData\Local\CrashDumps"); if(-not $IncludeOneDrive){ $xd += "OneDrive" }
+    if(-not (Test-Path $targetProfile)){
+        Write-Log -Message "Target profile path does not exist: $targetProfile. Creating directory. (Domain users: ensure user has logged in at least once.)" -Level 'WARN'
+        try {
+            New-Item -ItemType Directory -Path $targetProfile -Force | Out-Null
+            Write-Log -Message "Created target profile directory: $targetProfile"
+        } catch {
+            Write-Log -Message "Failed to create target profile directory $targetProfile : $_" -Level 'ERROR'
+            return "Failed to create target profile: $_"
+        }
+    } else {
+        Write-Log -Message "Target profile path validated: $targetProfile"
+    }
+    $xd=@("AppData\Local\Temp","AppData\Local\Packages","AppData\Local\Microsoft\Windows\INetCache","AppData\Local\CrashDumps"); if(-not $IncludeOneDrive){ $xd += Get-ChildItem -Path $SourceFolder -Directory -Filter "OneDrive*" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name }
     $xdArgs=@(); foreach($d in $xd){ $xdArgs += @("/XD",(Join-Path $SourceFolder $d)) }
     $isUnc=$SourceFolder.StartsWith("\\"); $copyFlags=@("/COPY:DAT","/DCOPY:DAT"); if(-not $isUnc){ $copyFlags += "/SEC" }
     $args=@($SourceFolder,$targetProfile,"/E","/R:1","/W:1","/XJ") + $copyFlags + $xdArgs
@@ -1484,6 +1832,7 @@ function Copy-ProfileToUser { param([string]$SourceFolder,[string]$TargetUserNam
     $proc=Start-Process -FilePath robocopy.exe -ArgumentList $args -Wait -PassThru -NoNewWindow
     $code=$proc.ExitCode
     Write-Log -Message "Robocopy restore exit code: $code"
+    if ($code -gt 1) { Write-Log -Message "Robocopy warning/error: exit code $code (0=success, 1=files copied ok, 2+=partial failure)" -Level 'WARN' }
     return "Robocopy restore exit code: $code (0/1=OK)."
 }
 
@@ -1528,31 +1877,30 @@ if ($DestinationPath) { $tbDest.Text = $DestinationPath }
 if ($PSBoundParameters.ContainsKey('IncludeOneDrive')) { $cbOneDrive.Checked = [bool]$IncludeOneDrive }
 if ($PSBoundParameters.ContainsKey('SkipProfileCopy')) { $cbSkipCopy.Checked = [bool]$SkipProfileCopy }
 if ($PSBoundParameters.ContainsKey('CaptureOutlookCredentials')) { $cbOutlookCred.Checked = [bool]$CaptureOutlookCredentials }
-$btnChrome = New-Object System.Windows.Forms.Button; $btnChrome.Text = "Export Chrome Passwords"; $btnChrome.SetBounds(10,100,240,30); $btnChrome.Add_Click({ Show-ChromePasswordExportGuide | Out-Null })
-$btnWallpaper = New-Object System.Windows.Forms.Button; $btnWallpaper.Text = "Copy Current Wallpaper"; $btnWallpaper.SetBounds(260,100,180,30); $btnWallpaper.Add_Click({ Copy-Wallpaper | Out-Null })
-$btnSignatures = New-Object System.Windows.Forms.Button; $btnSignatures.Text = "Copy Outlook Signatures"; $btnSignatures.SetBounds(450,100,200,30); $btnSignatures.Add_Click({ Copy-OutlookSignatures | Out-Null })
-$btnDeregEdit = New-Object System.Windows.Forms.Button; $btnDeregEdit.Text = "Edit Deregistration List"; $btnDeregEdit.SetBounds(660,100,170,30); $btnDeregEdit.Add_Click({
-    $list = Ensure-DeregList
-    $path = Get-DeregListPath
-    if ($path) {
-        if (-not (Test-Path $path)) { Save-Json -Object $list -Path $path }
-        Start-Process notepad.exe $path | Out-Null
-    } else {
-        [System.Windows.Forms.MessageBox]::Show('Repository not initialized yet. Start a gather first.','Repository Pending','OK','Warning') | Out-Null
-    }
-})
-$btnStartGather = New-Object System.Windows.Forms.Button; $btnStartGather.Text = "Start Gather"; $btnStartGather.SetBounds(10,140,150,32)
-$btnOpenRepo = New-Object System.Windows.Forms.Button; $btnOpenRepo.Text = "Open Repo Folder"; $btnOpenRepo.SetBounds(170,140,170,32); $btnOpenRepo.Add_Click({
-    $repoRoot = Get-SwapInfoRoot
-    if ($repoRoot -and (Test-Path $repoRoot)) {
-        Start-Process explorer.exe $repoRoot | Out-Null
-    } else {
-        [System.Windows.Forms.MessageBox]::Show('Repository folder not available yet. Start a gather to create it.','Repository Pending','OK','Warning') | Out-Null
-    }
-})
+
+# Browser Password Export Section
+$lblBrowsers = New-Object System.Windows.Forms.Label; $lblBrowsers.Text = "Browser Password Exports (Required):"; $lblBrowsers.SetBounds(10,105,300,20)
+$lblBrowserStatus = New-Object System.Windows.Forms.Label; $lblBrowserStatus.Text = "Detecting browsers..."; $lblBrowserStatus.SetBounds(10,130,810,25); $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Gray
+
+# Auto-detect browsers on form load (don't open them yet - that happens on Start Gather)
+Write-Log -Message "Detecting installed browsers..."
+$script:DetectedBrowsers = Get-InstalledBrowsers
+
+if ($script:DetectedBrowsers.Count -eq 0) {
+    $lblBrowserStatus.Text = "No browsers detected - browser password export not required"
+    $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Gray
+    Write-Log -Message "No browsers detected on this system"
+} else {
+    $browserNames = ($script:DetectedBrowsers | ForEach-Object { $_.DisplayName }) -join ', '
+    $lblBrowserStatus.Text = "Detected: $browserNames - browsers will open when you click Start Gather"
+    $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Blue
+    Write-Log -Message "Detected $($script:DetectedBrowsers.Count) browser(s): $browserNames"
+}
+
+$btnStartGather = New-Object System.Windows.Forms.Button; $btnStartGather.Text = "Start Gather"; $btnStartGather.SetBounds(10,165,150,32)
 $initialRepo = Get-SwapInfoRoot
-$lblInfo = New-Object System.Windows.Forms.Label; $lblInfo.Text = "All collected files + manifest/report/logs are written to: " + ($(if ($initialRepo) { $initialRepo } else { 'Not created yet' })); $lblInfo.SetBounds(10,175,820,20)
-$lvGather = New-Object System.Windows.Forms.TextBox; $lvGather.Multiline = $true; $lvGather.ReadOnly = $true; $lvGather.ScrollBars = 'Vertical'; $lvGather.SetBounds(10,205,820,300)
+$lblInfo = New-Object System.Windows.Forms.Label; $lblInfo.Text = "All collected files + manifest/report/logs are written to: " + ($(if ($initialRepo) { $initialRepo } else { 'Not created yet' })); $lblInfo.SetBounds(10,240,820,20)
+$lvGather = New-Object System.Windows.Forms.TextBox; $lvGather.Multiline = $true; $lvGather.ReadOnly = $true; $lvGather.ScrollBars = 'Vertical'; $lvGather.SetBounds(10,270,820,235)
 Add-LogSubscriber { param($line) $lvGather.AppendText($line + [Environment]::NewLine) }
 $tabGather.Controls.AddRange(@(
     $lblDest,
@@ -1561,12 +1909,9 @@ $tabGather.Controls.AddRange(@(
     $cbOneDrive,
     $cbSkipCopy,
     $cbOutlookCred,
-    $btnChrome,
-    $btnWallpaper,
-    $btnSignatures,
-    $btnDeregEdit,
+    $lblBrowsers,
+    $lblBrowserStatus,
     $btnStartGather,
-    $btnOpenRepo,
     $lblInfo,
     $lvGather
 ))
@@ -1582,8 +1927,53 @@ $btnStartGather.Add_Click({
     }
     $repo = Ensure-Repository -BasePath $destBase -OpenFolder:$false
     if (-not $repo) { return }
+    if (-not (Test-DiskSpace -Path $destBase -MinimumGB 10)) {
+        [System.Windows.Forms.MessageBox]::Show("Insufficient disk space. At least 10GB required.","Disk Space Error",'OK','Warning') | Out-Null
+        return
+    }
 
     Ensure-AdminOrWarn
+
+    # Open browsers for password export if any detected and not already done
+    if ($script:DetectedBrowsers.Count -gt 0) {
+        Write-Log -Message "Opening browsers for password export..."
+        Show-BrowserPasswordExportGuide -Browsers $script:DetectedBrowsers
+        $lblBrowserStatus.Text = "Browsers opened - export passwords and save to Browser_Exports folder"
+        $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Orange
+
+        # Prompt technician to export passwords before continuing
+        $result = [System.Windows.Forms.MessageBox]::Show(
+            "Browser password export pages have been opened in your browsers.`n`nPlease export passwords from each browser to the Browser_Exports folder, then click OK to continue the gather process.",
+            "Export Browser Passwords",
+            'OKCancel',
+            'Information'
+        )
+        if ($result -eq 'Cancel') {
+            Write-Log -Message "Gather cancelled by technician during browser export step" -Level 'WARN'
+            return
+        }
+    }
+
+    # Validate browser password exports before starting gather
+    if ($script:DetectedBrowsers.Count -gt 0) {
+        $exportResults = Test-BrowserPasswordExports -Browsers $script:DetectedBrowsers
+        $missingExports = @($exportResults.Values | Where-Object { $_ -eq $false })
+        $missingCount = $missingExports.Count
+        if ($missingCount -gt 0) {
+            $missingBrowsers = $exportResults.GetEnumerator() | Where-Object { $_.Value -eq $false } | ForEach-Object { $_.Key }
+            $missingList = $missingBrowsers -join ', '
+            $message = "Browser password exports are required but incomplete.`n`nMissing exports for: $missingList`n`nPlease export passwords from the browsers listed above, then click Start Gather again."
+            [System.Windows.Forms.MessageBox]::Show($message, "Browser Exports Required", 'OK', 'Warning') | Out-Null
+            Write-Log -Message "Gather blocked: Missing browser password exports for $missingList" -Level 'WARN'
+            return
+        }
+        Write-Log -Message "All detected browser password exports validated - proceeding with gather"
+        $lblBrowserStatus.Text = "All browser password exports validated"
+        $lblBrowserStatus.ForeColor = [System.Drawing.Color]::Green
+    } else {
+        Write-Log -Message "No browsers detected - skipping browser export validation"
+    }
+
     Write-Log -Message "=== GATHER START ==="
 
     # 1) Select & validate destination base path first
@@ -1624,10 +2014,7 @@ $btnStartGather.Add_Click({
     # Export wireless profiles to repository (WLAN profiles)
     if (Get-Command Export-WlanProfiles -ErrorAction SilentlyContinue) { $null = Export-WlanProfiles }
 
-    # 5) Remind technician to export Chrome passwords manually (repo exists now)
-    if (Get-Command Show-ChromePasswordExportGuide -ErrorAction SilentlyContinue) { $null = Show-ChromePasswordExportGuide }
-
-    # 5.5) If capturing Outlook credentials, prompt now (before manifest build) and store in global
+    # If capturing Outlook credentials, prompt now (before manifest build) and store in global
     if ($cbOutlookCred.Checked) {
         try {
             $script:OutlookSetupCred = Prompt-OutlookAccount
@@ -1666,9 +2053,27 @@ $btnStartGather.Add_Click({
     if ($activeRepoRoot -and (Test-Path $activeRepoRoot)) {
         Start-Process explorer.exe $activeRepoRoot | Out-Null
     }
+
+    # Verify browser password exports are complete (should always pass since gather is blocked otherwise)
+    $browserReminder = ""
+    if ($script:DetectedBrowsers.Count -gt 0) {
+        $exportResults = Test-BrowserPasswordExports -Browsers $script:DetectedBrowsers
+        $missingExports = @($exportResults.Values | Where-Object { $_ -eq $false })
+        $missing = $missingExports.Count
+        if ($missing -gt 0) {
+            # This should never happen since gather is blocked if exports are incomplete
+            $missingBrowsers = $exportResults.GetEnumerator() | Where-Object { $_.Value -eq $false } | ForEach-Object { $_.Key }
+            $missingList = $missingBrowsers -join ', '
+            $browserReminder = "`n`nUNEXPECTED: Missing browser password exports detected:`n$missingList`n`nThis should not have occurred as gather is blocked if exports are incomplete."
+            Write-Log -Message "UNEXPECTED: Gather completed with missing browser exports: $missingList (gather validation may have been bypassed)" -Level 'ERROR'
+        } else {
+            Write-Log -Message "All detected browser password exports validated successfully"
+        }
+    }
+
     $reportDisplay = if ($rp) { $rp } else { 'Not generated' }
     $repoDisplay = if ($activeRepoRoot) { $activeRepoRoot } else { 'Not available' }
-    [System.Windows.Forms.MessageBox]::Show(("Gather complete.`n`nReport: {0}`nRepository: {1}" -f $reportDisplay, $repoDisplay), "Gather Done", 'OK','Information') | Out-Null
+    [System.Windows.Forms.MessageBox]::Show(("Gather complete.`n`nReport: {0}`nRepository: {1}{2}" -f $reportDisplay, $repoDisplay, $browserReminder), "Gather Done", 'OK','Information') | Out-Null
 
     Write-Log -Message "=== GATHER END ==="
 })
@@ -1681,10 +2086,12 @@ $lblDom = New-Object System.Windows.Forms.Label; $lblDom.Text = "Optional: Join 
 $tbDomain = New-Object System.Windows.Forms.TextBox; $tbDomain.SetBounds(10,95,300,25)
 $lblOU = New-Object System.Windows.Forms.Label; $lblOU.Text = "Optional OU (distinguished name):"; $lblOU.SetBounds(320,70,250,20)
 $tbOU = New-Object System.Windows.Forms.TextBox; $tbOU.SetBounds(320,95,300,25)
-$btnStartRestore = New-Object System.Windows.Forms.Button; $btnStartRestore.Text = "Start Restore"; $btnStartRestore.SetBounds(10,130,150,32)
-$btnDefaults = New-Object System.Windows.Forms.Button; $btnDefaults.Text = "Open Default Apps Guidance"; $btnDefaults.SetBounds(170,130,220,32); $btnDefaults.Add_Click({ Open-DefaultAppsGuidance })
-$btnApplySysDefaults = New-Object System.Windows.Forms.Button; $btnApplySysDefaults.Text = "Apply System Default Apps (DISM)"; $btnApplySysDefaults.SetBounds(400,130,240,32); $btnApplySysDefaults.Add_Click({ $m=$null; if(Test-Path $tbMan.Text){ $m=Load-Json -Path $tbMan.Text }; if($m){ Apply-SystemDefaultAppsFromManifest -Manifest $m } })
-$btnOpenManifestFolder = New-Object System.Windows.Forms.Button; $btnOpenManifestFolder.Text = "Open Manifest Folder"; $btnOpenManifestFolder.SetBounds(650,130,180,32); $btnOpenManifestFolder.Add_Click({
+$lblDomainUser = New-Object System.Windows.Forms.Label; $lblDomainUser.Text = "Target Domain Username (if joining domain, username only e.g. 'jsmith'):"; $lblDomainUser.SetBounds(10,125,500,20)
+$tbDomainUser = New-Object System.Windows.Forms.TextBox; $tbDomainUser.SetBounds(10,150,300,25)
+$btnStartRestore = New-Object System.Windows.Forms.Button; $btnStartRestore.Text = "Start Restore"; $btnStartRestore.SetBounds(10,185,150,32)
+$btnDefaults = New-Object System.Windows.Forms.Button; $btnDefaults.Text = "Open Default Apps Guidance"; $btnDefaults.SetBounds(170,185,220,32); $btnDefaults.Add_Click({ Open-DefaultAppsGuidance })
+$btnApplySysDefaults = New-Object System.Windows.Forms.Button; $btnApplySysDefaults.Text = "Apply System Default Apps (DISM)"; $btnApplySysDefaults.SetBounds(400,185,240,32); $btnApplySysDefaults.Add_Click({ $m=$null; if(Test-Path $tbMan.Text){ $m=Load-Json -Path $tbMan.Text }; if($m){ Apply-SystemDefaultAppsFromManifest -Manifest $m } })
+$btnOpenManifestFolder = New-Object System.Windows.Forms.Button; $btnOpenManifestFolder.Text = "Open Manifest Folder"; $btnOpenManifestFolder.SetBounds(650,185,180,32); $btnOpenManifestFolder.Add_Click({
     if (Test-Path $tbMan.Text) {
         $folder = Split-Path -Parent $tbMan.Text
         if ($folder -and (Test-Path $folder)) {
@@ -1695,12 +2102,12 @@ $btnOpenManifestFolder = New-Object System.Windows.Forms.Button; $btnOpenManifes
     }
 })
 # Profile source root picker
-$lblSrc = New-Object System.Windows.Forms.Label; $lblSrc.Text = "Profile source ROOT (contains OLDHOST_DD-MM-YYYY folder):"; $lblSrc.SetBounds(10,170,480,20)
-$tbSrcRoot = New-Object System.Windows.Forms.TextBox; $tbSrcRoot.SetBounds(10,195,650,25)
-$btnBrowseSrc = New-Object System.Windows.Forms.Button; $btnBrowseSrc.Text = "Browse..."; $btnBrowseSrc.SetBounds(670,194,80,27); $btnBrowseSrc.Add_Click({ $sel=Select-FolderDialog; if($sel){ $tbSrcRoot.Text=$sel } })
-$lvRestore = New-Object System.Windows.Forms.TextBox; $lvRestore.Multiline = $true; $lvRestore.ReadOnly = $true; $lvRestore.ScrollBars = 'Vertical'; $lvRestore.SetBounds(10,230,820,275)
+$lblSrc = New-Object System.Windows.Forms.Label; $lblSrc.Text = "Profile source ROOT (contains OLDHOST_DD-MM-YYYY folder):"; $lblSrc.SetBounds(10,225,480,20)
+$tbSrcRoot = New-Object System.Windows.Forms.TextBox; $tbSrcRoot.SetBounds(10,250,650,25)
+$btnBrowseSrc = New-Object System.Windows.Forms.Button; $btnBrowseSrc.Text = "Browse..."; $btnBrowseSrc.SetBounds(670,249,80,27); $btnBrowseSrc.Add_Click({ $sel=Select-FolderDialog; if($sel){ $tbSrcRoot.Text=$sel } })
+$lvRestore = New-Object System.Windows.Forms.TextBox; $lvRestore.Multiline = $true; $lvRestore.ReadOnly = $true; $lvRestore.ScrollBars = 'Vertical'; $lvRestore.SetBounds(10,285,820,220)
 Add-LogSubscriber { param($line) $lvRestore.AppendText($line + [Environment]::NewLine) }
-$tabRestore.Controls.AddRange(@($lblMan,$tbMan,$btnBrowseMan,$lblDom,$tbDomain,$lblOU,$tbOU,$btnStartRestore,$btnDefaults,$btnApplySysDefaults,$btnOpenManifestFolder,$lblSrc,$tbSrcRoot,$btnBrowseSrc,$lvRestore))
+$tabRestore.Controls.AddRange(@($lblMan,$tbMan,$btnBrowseMan,$lblDom,$tbDomain,$lblOU,$tbOU,$lblDomainUser,$tbDomainUser,$btnStartRestore,$btnDefaults,$btnApplySysDefaults,$btnOpenManifestFolder,$lblSrc,$tbSrcRoot,$btnBrowseSrc,$lvRestore))
 
 $tbMan.Add_TextChanged({
     $path = $tbMan.Text
@@ -1730,6 +2137,10 @@ $btnStartRestore.Add_Click({
     if (-not (Test-Path $tbMan.Text)) { [System.Windows.Forms.MessageBox]::Show("Please select a valid manifest.json.","Missing Manifest",'OK','Warning') | Out-Null; return }
     $manifest = Load-Json -Path $tbMan.Text
     if (-not $manifest) { [System.Windows.Forms.MessageBox]::Show("Manifest could not be parsed.","Manifest Error",'OK','Error') | Out-Null; return }
+    $schemaVersion = $manifest.PSObject.Properties['SchemaVersion']
+    if ($schemaVersion -and $schemaVersion.Value -ne $ManifestSchemaVersion) {
+        Write-Log -Message "Warning: Manifest schema version mismatch. Expected $ManifestSchemaVersion, got $($schemaVersion.Value)" -Level 'WARN'
+    }
 
     # Set repository root based on the selected manifest so that state.json and other repo
     # artifacts are written/read from the correct location during restore.
@@ -1755,15 +2166,24 @@ $btnStartRestore.Add_Click({
 
     $domain = $tbDomain.Text.Trim()
     $ou     = $tbOU.Text.Trim()
+    $domainUser = $tbDomainUser.Text.Trim()
     $createdLocalUser = $false
     $targetLocalUser  = $null
+    $targetDomainUser = $null
 
     if ($domain) {
         try {
+            # Validate domain user was provided
+            if ([string]::IsNullOrWhiteSpace($domainUser)) {
+                Write-Log -Message "Target domain username required when joining domain. Please specify the username." -Level 'ERROR'
+                [System.Windows.Forms.MessageBox]::Show("Please enter the target domain username (e.g., 'jsmith') to receive the migrated profile.","Domain User Required","OK","Warning") | Out-Null
+                return
+            }
             $cred = $Host.UI.PromptForCredential("Domain Join","Enter credentials permitted to join $domain","$env:USERDOMAIN\$env:USERNAME",$domain)
             if ($ou) { Add-Computer -DomainName $domain -OUPath $ou -Credential $cred -ErrorAction Stop }
             else     { Add-Computer -DomainName $domain -Credential $cred -ErrorAction Stop }
-            Write-Log -Message "Domain join scheduled."
+            Write-Log -Message "Domain join scheduled. Target user: $domainUser"
+            $targetDomainUser = $domainUser
             $needReboot = $true
         } catch { Write-Log -Message "Domain join failed: $_" -Level 'ERROR' }
     } else {
@@ -1787,7 +2207,7 @@ $btnStartRestore.Add_Click({
     }
 
     # Save state and register resumes
-    $state = @{ NextPhase = "PostJoin"; ManifestPath = $tbMan.Text; ProfileSource = $profileSource; IncludeOneDrive = [bool]$manifest.IncludeOneDrive; TargetLocalUser = $targetLocalUser }
+    $state = @{ NextPhase = "PostJoin"; ManifestPath = $tbMan.Text; ProfileSource = $profileSource; IncludeOneDrive = [bool]$manifest.IncludeOneDrive; TargetLocalUser = $targetLocalUser; TargetDomainUser = $targetDomainUser }
     $statePath = Get-StatePath
     if ($statePath) {
         Save-Json -Object $state -Path $statePath
@@ -1799,7 +2219,16 @@ $btnStartRestore.Add_Click({
     $resumeScriptPath = Get-ExecutableScriptPath
     if (-not [string]::IsNullOrWhiteSpace($resumeScriptPath)) {
         New-RunOnceResume -ScriptPath $resumeScriptPath -ManifestPath $tbMan.Text
-        if ($createdLocalUser) { Register-UserResumeTaskEx -UserName $targetLocalUser -ScriptPath $resumeScriptPath -ManifestPath $tbMan.Text | Out-Null }
+        # Register user-context resume task for either local or domain user
+        $resumeUser = $null
+        if ($createdLocalUser) { $resumeUser = $targetLocalUser }
+        elseif ($targetDomainUser) { $resumeUser = $targetDomainUser }
+        if ($resumeUser) {
+            Write-Log -Message "Registering user-context resume task for: $resumeUser"
+            Register-UserResumeTaskEx -UserName $resumeUser -ScriptPath $resumeScriptPath -ManifestPath $tbMan.Text | Out-Null
+        } else {
+            Write-Log -Message "No target user specified; user-context resume will not run." -Level 'WARN'
+        }
     } else {
         Write-Log -Message 'Unable to determine script path for resume scheduling.' -Level 'WARN'
     }
@@ -1822,7 +2251,7 @@ $btnStartRestore.Add_Click({
             }
         }
     } catch { Write-Log -Message "Wireless profile import error: $($_)" -Level 'WARN' }
-    Restore-WallpaperAndSignatures
+    # Wallpaper and signatures are restored in user-context resume (at user logon), not during system-context restore
     # Default app configuration is deferred until the target user logs in.
     # Do not show Outlook credentials during system-context restore; this will be handled in user context
     Write-Log -Message "=== RESTORE END ==="
@@ -1874,7 +2303,7 @@ if ($Resume) {
                     }
                 }
             } catch { Write-Log -Message "Wireless profile import error (resume): $($_)" -Level 'WARN' }
-            Restore-WallpaperAndSignatures
+            # Wallpaper and signatures are restored in user-context resume, not system-context
             Write-Log -Message "Post-join steps executed."
         } else {
             Write-Log -Message "Manifest missing on resume (path: $manifestPath)." -Level 'ERROR'
@@ -1921,7 +2350,18 @@ if ($ResumeUser) {
     }
 
     if ($state) {
-        $targetUser = $env:USERNAME
+        # Determine target user from state (domain user takes precedence, then local user, finally fallback to current user)
+        $targetUser = $null
+        if ($state.PSObject.Properties['TargetDomainUser'] -and -not [string]::IsNullOrWhiteSpace($state.TargetDomainUser)) {
+            $targetUser = $state.TargetDomainUser
+            Write-Log -Message "Using target domain user from state: $targetUser"
+        } elseif ($state.PSObject.Properties['TargetLocalUser'] -and -not [string]::IsNullOrWhiteSpace($state.TargetLocalUser)) {
+            $targetUser = $state.TargetLocalUser
+            Write-Log -Message "Using target local user from state: $targetUser"
+        } else {
+            $targetUser = $env:USERNAME
+            Write-Log -Message "No target user in state; using current user: $targetUser" -Level 'WARN'
+        }
         $src = $state.ProfileSource
         $incl = [bool]$state.IncludeOneDrive
         if ($src) {
@@ -1946,6 +2386,7 @@ if ($ResumeUser) {
         }
     }
 
+    Remove-UserResumeTask -TaskName 'PCSwap-Resume-User' | Out-Null
     Write-Log -Message "=== USER RESUME END ==="
     exit 0
 }

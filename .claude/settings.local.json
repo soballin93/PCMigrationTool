@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"Invoke-Pester ./tests -Output Detailed 2>&1 | Select-Object -Last 20\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

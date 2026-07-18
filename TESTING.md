@@ -1,166 +1,36 @@
-# Testing & Validation Quick Start
+# Testing and Validation
 
-This document provides a quick reference for running tests and validation locally.
+## Automated Checks
 
-## Quick Commands
+Run on Windows with the .NET 10 SDK:
 
-### Run Everything
 ```powershell
-.\Invoke-ValidationSuite.ps1
+dotnet restore .\PCMigrationTool.sln
+dotnet build .\PCMigrationTool.sln -c Release --no-restore
+dotnet test .\PCMigrationTool.sln -c Release --no-build
 ```
 
-### Run Specific Checks
+xUnit tests cover repository layout enforcement, atomic/legacy JSON loading, Robocopy exit codes and exclusions, mapped-drive validation, and shared-printer selection. The build treats compiler warnings as errors.
+
+If `PCSwapTool.ps1` changes, also install Pester 5 and PSScriptAnalyzer and run:
+
 ```powershell
-# Syntax and linting only (fast)
-.\Invoke-ValidationSuite.ps1 -SkipTests
-
-# Syntax and tests only
-.\Invoke-ValidationSuite.ps1 -SkipLinting
-
-# With detailed output
 .\Invoke-ValidationSuite.ps1 -Detailed
 ```
 
-### Run Tests Only
-```powershell
-# Run all tests
-Invoke-Pester ./tests
+## Required Windows Exercise
 
-# Run with detailed output
-Invoke-Pester ./tests -Output Detailed
+Changes to gather, profile copy, account setup, domain join, tasks, or resume logic require two Windows 10/11 machines or disposable VMs:
 
-# Run specific test file
-Invoke-Pester ./tests/PCSwapTool.Tests.ps1
-```
+1. Build and publish on the source machine.
+2. Create a uniquely named marker in the source profile.
+3. Run a full gather; require a successful result JSON and Robocopy code below 8.
+4. Transfer the executable and complete repository. Compare executable SHA-256 values.
+5. Confirm the destination has no `dotnet` command.
+6. Prepare restore and execute the cached system/user resume phases.
+7. Require `NextPhase: Complete`, matching marker hashes, final guidance, and removal of both scheduled tasks.
+8. Review the application log, `profile-copy.log`, manifest, and technician report.
 
-### Run Linting Only
-```powershell
-# Analyze all scripts
-Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\.vscode\PSScriptAnalyzerSettings.psd1
+Use the GUI for layout and elevation checks. Test reboot/logon scheduling when task registration changes; `--no-resume-tasks` is acceptable only for repeatable phase-level automation. Domain joins require a disposable domain object and a real reboot.
 
-# Analyze specific file
-Invoke-ScriptAnalyzer -Path .\PCSwapTool.ps1 -Settings .\.vscode\PSScriptAnalyzerSettings.psd1
-```
-
-## Setup (One-Time)
-
-### Install Required Modules
-```powershell
-# PSScriptAnalyzer for linting
-Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force
-
-# Pester for testing (requires v5.0+)
-Install-Module -Name Pester -MinimumVersion 5.0 -Scope CurrentUser -Force -SkipPublisherCheck
-```
-
-### Install Git Hooks
-```powershell
-.\.githooks\install-hooks.ps1
-```
-
-This enables automatic validation before each commit.
-
-## What Gets Checked
-
-| Check | Tool | Purpose | Blocks Commit? |
-|-------|------|---------|----------------|
-| **Syntax** | PowerShell Parser | Ensures code parses without errors | Yes |
-| **Linting** | PSScriptAnalyzer | Checks style, best practices, security | Errors only |
-| **Tests** | Pester | Validates functionality | Yes |
-
-## Understanding Results
-
-### Syntax Validation
-- **PASSED**: All scripts parse correctly
-- **FAILED**: Syntax errors found (must fix)
-
-### Linting
-- **PASSED**: No errors or warnings
-- **PASSED (with warnings)**: Has warnings but no errors (can commit)
-- **FAILED**: Has errors (must fix)
-- **SKIPPED**: PSScriptAnalyzer not installed
-
-### Tests
-- **PASSED**: All tests passed
-- **FAILED**: One or more tests failed (must fix)
-- **NO TESTS**: Tests directory doesn't exist
-- **SKIPPED**: Pester not installed
-
-## Common Issues
-
-### "PSScriptAnalyzer not found"
-```powershell
-Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force
-```
-
-### "Pester not found" or "Wrong Pester version"
-```powershell
-Install-Module -Name Pester -MinimumVersion 5.0 -Force -SkipPublisherCheck -Scope CurrentUser
-```
-
-### "Pre-commit hook not running"
-```powershell
-# Reinstall hooks
-.\.githooks\install-hooks.ps1
-
-# Verify configuration
-git config core.hooksPath
-# Should output: .githooks
-```
-
-### "Want to bypass hook temporarily"
-```powershell
-# Not recommended, but sometimes necessary for WIP commits
-git commit --no-verify -m "WIP: work in progress"
-```
-
-## CI/CD Pipeline
-
-The same checks run automatically on GitHub when you:
-- Push to `main`, `rewrite`, or `develop`
-- Create a Pull Request to `main` or `rewrite`
-
-View CI results:
-1. Go to your PR on GitHub
-2. Click the "Checks" tab
-3. See detailed logs for each job
-
-## Best Practices
-
-1. **Run validation before committing** (or let the hook do it)
-2. **Fix errors immediately** - don't let them accumulate
-3. **Address warnings when practical** - they don't block commits but improve quality
-4. **Add tests for new features** - keep test coverage high
-5. **Check CI results** - don't merge PRs with failing checks
-
-## More Information
-
-For comprehensive documentation, see:
-- **[DEVELOPMENT.md](./DEVELOPMENT.md)** - Complete development workflow guide
-- **[CLAUDE.md](./CLAUDE.md)** - Project architecture and guidelines
-- **[AGENTS.md](./AGENTS.md)** - Detailed coding standards (if exists)
-
-## Quick Reference Card
-
-```
-┌─────────────────────────────────────────────────────┐
-│  PCMigrationTool - Testing Quick Reference          │
-├─────────────────────────────────────────────────────┤
-│  Run all checks:                                    │
-│    .\Invoke-ValidationSuite.ps1                     │
-│                                                     │
-│  Run tests only:                                    │
-│    Invoke-Pester ./tests                            │
-│                                                     │
-│  Run linting only:                                  │
-│    Invoke-ScriptAnalyzer -Path . -Recurse `         │
-│      -Settings .\.vscode\PSScriptAnalyzerSettings.  │
-│         psd1                                        │
-│                                                     │
-│  Install hooks:                                     │
-│    .\.githooks\install-hooks.ps1                    │
-│                                                     │
-│  Bypass hook (not recommended):                     │
-│    git commit --no-verify                           │
-└─────────────────────────────────────────────────────┘
-```
+Browser changes require manual Chrome, Edge, Brave, Firefox, and Opera export checks as available. Network/printer changes must prove that unmatched adapters and unverifiable drivers remain untouched.

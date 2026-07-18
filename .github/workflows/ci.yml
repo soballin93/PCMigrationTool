@@ -7,6 +7,38 @@ on:
     branches: [ main, rewrite ]
 
 jobs:
+  native-build-and-test:
+    name: Native Build and Test
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up .NET 10
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Restore
+      run: dotnet restore .\PCMigrationTool.sln
+
+    - name: Build
+      run: dotnet build .\PCMigrationTool.sln --configuration Release --no-restore
+
+    - name: Test
+      run: dotnet test .\PCMigrationTool.sln --configuration Release --no-build --logger trx --results-directory TestResults
+
+    - name: Publish portable executable
+      run: dotnet publish .\src\PCMigrationTool\PCMigrationTool.csproj --configuration Release --no-build --output .\artifacts\publish
+
+    - name: Upload portable executable
+      uses: actions/upload-artifact@v4
+      with:
+        name: PCMigrationTool-win-x64
+        path: artifacts/publish/PCMigrationTool.exe
+        if-no-files-found: error
+
   lint-and-test:
     name: Lint and Test
     runs-on: windows-latest

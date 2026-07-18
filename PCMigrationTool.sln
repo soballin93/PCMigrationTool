@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PCMigrationTool.Core", "src\PCMigrationTool.Core\PCMigrationTool.Core.csproj", "{6676749F-CA64-4D02-AB8C-91BD6404E1EC}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PCMigrationTool", "src\PCMigrationTool\PCMigrationTool.csproj", "{81229F52-D1F4-4D07-A91B-D63C23C1BA4C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PCMigrationTool.Core.Tests", "tests\PCMigrationTool.Core.Tests\PCMigrationTool.Core.Tests.csproj", "{848113C3-76B7-46EB-B377-1F76AD0623AD}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{6676749F-CA64-4D02-AB8C-91BD6404E1EC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6676749F-CA64-4D02-AB8C-91BD6404E1EC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6676749F-CA64-4D02-AB8C-91BD6404E1EC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6676749F-CA64-4D02-AB8C-91BD6404E1EC}.Release|Any CPU.Build.0 = Release|Any CPU
+		{81229F52-D1F4-4D07-A91B-D63C23C1BA4C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{81229F52-D1F4-4D07-A91B-D63C23C1BA4C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{81229F52-D1F4-4D07-A91B-D63C23C1BA4C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{81229F52-D1F4-4D07-A91B-D63C23C1BA4C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{848113C3-76B7-46EB-B377-1F76AD0623AD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{848113C3-76B7-46EB-B377-1F76AD0623AD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{848113C3-76B7-46EB-B377-1F76AD0623AD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{848113C3-76B7-46EB-B377-1F76AD0623AD}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

@@ -1,0 +1,13 @@
+bin/
+obj/
+artifacts/
+TestResults/
+*.user
+*.suo
+*.log
+state.json
+manifest.json
+technician_report_*.txt
+Browser_Exports/
+WirelessProfiles/
+Screenshots/
